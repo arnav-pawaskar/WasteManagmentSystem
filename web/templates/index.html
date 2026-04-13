@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fog-Based Smart Waste Management System</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Fog-Based Smart Waste Management System</h1>
+            <p class="subtitle">Distributed Fog Computing | Real-time Visualization</p>
+        </header>
+
+        <div class="control-panel">
+            <div class="config-section">
+                <h3>System Configuration</h3>
+                <div class="config-form">
+                    <div class="form-group">
+                        <label for="zones">Zones:</label>
+                        <input type="number" id="zones" value="3" min="1" max="10">
+                    </div>
+                    <div class="form-group">
+                        <label for="bins">Bins/Zone:</label>
+                        <input type="number" id="bins" value="15" min="5" max="50">
+                    </div>
+                    <div class="form-group">
+                        <label for="trucks">Trucks/Zone:</label>
+                        <input type="number" id="trucks" value="1" min="1" max="5">
+                    </div>
+                    <button id="start-btn" class="btn btn-primary">[>] Start System</button>
+                    <button id="stop-btn" class="btn btn-danger" disabled>[ ] Stop</button>
+                </div>
+            </div>
+
+            <div class="status-section">
+                <h3>System Status</h3>
+                <div class="status-grid">
+                    <div class="status-card">
+                        <span class="status-label">Status</span>
+                        <span id="system-status" class="status-value status-stopped">Stopped</span>
+                    </div>
+                    <div class="status-card">
+                        <span class="status-label">Total Bins</span>
+                        <span id="total-bins" class="status-value">0</span>
+                    </div>
+                    <div class="status-card">
+                        <span class="status-label">Overflowing</span>
+                        <span id="overflowing-bins" class="status-value">0</span>
+                    </div>
+                    <div class="status-card">
+                        <span class="status-label">Routes Completed</span>
+                        <span id="routes-completed" class="status-value">0</span>
+                    </div>
+                    <div class="status-card">
+                        <span class="status-label">Current Leader</span>
+                        <span id="current-leader" class="status-value leader-none">None</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="visualization-panel">
+            <div class="viz-section bins-view">
+                <h3>Bin Status Map</h3>
+                <div class="legend">
+                    <span class="legend-item"><span class="color-box normal"></span> Normal (&lt;80%)</span>
+                    <span class="legend-item"><span class="color-box medium"></span> Medium (80-85%)</span>
+                    <span class="legend-item"><span class="color-box high"></span> High (85-95%)</span>
+                    <span class="legend-item"><span class="color-box critical"></span> Critical (≥95%)</span>
+                </div>
+                <canvas id="bins-canvas" width="900" height="300"></canvas>
+            </div>
+
+            <div class="viz-section routes-view">
+                <h3>Active Truck Routes</h3>
+                <canvas id="routes-canvas" width="900" height="300"></canvas>
+            </div>
+
+            <div class="viz-row">
+                <div class="viz-section network-view">
+                    <h3>Fog Node Network</h3>
+                    <div class="network-controls">
+                        <button id="trigger-election-btn" class="btn btn-small">Trigger Election</button>
+                    </div>
+                    <canvas id="network-canvas" width="500" height="400"></canvas>
+                </div>
+
+                <div class="viz-section events-view">
+                    <h3>Event Log</h3>
+                    <div id="event-log" class="event-log"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="module-info">
+            <h3>Module Status</h3>
+            <div class="modules-grid">
+                <div class="module-card">
+                    <h4>Route Optimization</h4>
+                    <p>Nearest Neighbour Algorithm</p>
+                    <div class="module-stats" id="route-stats">
+                        <span>Active: 0</span>
+                        <span>Completed: 0</span>
+                    </div>
+                </div>
+                <div class="module-card">
+                    <h4>Inter-Fog Communication</h4>
+                    <p>Gossip Protocol & Spillover</p>
+                    <div class="module-stats" id="comm-stats">
+                        <span>Peers: 0</span>
+                        <span>Spillovers: 0</span>
+                    </div>
+                </div>
+                <div class="module-card">
+                    <h4>Election Module</h4>
+                    <p>Invitation Election Algorithm</p>
+                    <div class="module-stats" id="election-stats">
+                        <span>State: IDLE</span>
+                        <span>Term: 0</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
