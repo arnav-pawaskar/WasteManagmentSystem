@@ -70,12 +70,12 @@
                     <span class="legend-item"><span class="color-box high"></span> High (85-95%)</span>
                     <span class="legend-item"><span class="color-box critical"></span> Critical (≥95%)</span>
                 </div>
-                <canvas id="bins-canvas" width="900" height="300"></canvas>
+                <div class="canvas-container"><canvas id="bins-canvas"></canvas></div>
             </div>
 
             <div class="viz-section routes-view">
                 <h3>Active Truck Routes</h3>
-                <canvas id="routes-canvas" width="900" height="300"></canvas>
+                <div class="canvas-container"><canvas id="routes-canvas"></canvas></div>
             </div>
 
             <div class="viz-row">
@@ -84,7 +84,7 @@
                     <div class="network-controls">
                         <button id="trigger-election-btn" class="btn btn-small">Trigger Election</button>
                     </div>
-                    <canvas id="network-canvas" width="500" height="400"></canvas>
+                    <div class="canvas-container network-canvas-container"><canvas id="network-canvas"></canvas></div>
                 </div>
 
                 <div class="viz-section events-view">

@@ -129,6 +129,49 @@ class SmartWasteManagementSystem:
         
         # Print fog node status
         self.fog_simulator.print_system_status()
+
+    def _print_detailed_statistics(self):
+        """Print detailed per-zone and election statistics"""
+        print(f"\n{'='*60}")
+        print("DETAILED SYSTEM STATISTICS")
+        print(f"{'='*60}")
+
+        # Bin statistics by zone
+        bin_stats = self.bin_simulator.get_statistics()
+        print("\nBin Statistics By Zone:")
+        for zone_key, zone_data in bin_stats["zone_stats"].items():
+            zone_id = zone_key.split("_")[-1]
+            print(
+                f"  Zone {zone_id}: "
+                f"{zone_data['overflowing_bins']}/{zone_data['total_bins']} overflowing, "
+                f"avg fill {zone_data['avg_fill_level']:.1f}%"
+            )
+
+        # Fog node and communication statistics
+        system_status = self.fog_simulator.get_system_status()
+        print("\nFog Node Details:")
+        for zone_id, node_status in system_status["nodes"].items():
+            comm = node_status["communication_status"]
+            stats = node_status["statistics"]
+            print(f"  Zone {zone_id}:")
+            print(f"    Leader: {node_status['is_leader']}")
+            print(f"    Active Routes: {node_status['zone_status']['active_routes']}")
+            print(f"    Completed Routes: {stats['routes_completed']}")
+            print(f"    Bins Serviced: {stats['bins_serviced']}")
+            print(f"    Known Peers: {comm['peer_discovery']['total_peers']}")
+            print(f"    Spillovers: {stats['spillovers_handled']}")
+
+        # Election overview
+        election = self.fog_simulator.leader_manager.get_election_overview()
+        print("\nElection Overview:")
+        print(f"  Current Leader: {election['current_leader']}")
+        print(f"  Total Elections: {election['total_elections']}")
+        if election["election_history"]:
+            last_event = election["election_history"][-1]
+            print(f"  Last Leader Change: {last_event['timestamp']}")
+            print(f"  Previous Leader: {last_event['previous_leader']}")
+
+        print(f"\n{'='*60}")
     
     def shutdown(self):
         """Shutdown the system"""

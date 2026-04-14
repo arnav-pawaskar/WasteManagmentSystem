@@ -1,4 +1,4 @@
-// Smart Waste Management System - Web UI Controller
+// Smart Waste Management System - Web UI Controller with HiDPI Support
 
 const API_BASE = '';
 let updateInterval = null;
@@ -15,13 +15,15 @@ const routesCompletedEl = document.getElementById('routes-completed');
 const currentLeaderEl = document.getElementById('current-leader');
 const eventLogEl = document.getElementById('event-log');
 
-// Canvas contexts
+// Canvas elements
 const binsCanvas = document.getElementById('bins-canvas');
 const routesCanvas = document.getElementById('routes-canvas');
 const networkCanvas = document.getElementById('network-canvas');
-const binsCtx = binsCanvas.getContext('2d');
-const routesCtx = routesCanvas.getContext('2d');
-const networkCtx = networkCanvas.getContext('2d');
+
+// Canvas contexts with willReadFrequently for better performance
+const binsCtx = binsCanvas.getContext('2d', { willReadFrequently: true });
+const routesCtx = routesCanvas.getContext('2d', { willReadFrequently: true });
+const networkCtx = networkCanvas.getContext('2d', { willReadFrequently: true });
 
 // Data storage
 let binsData = [];
@@ -29,10 +31,45 @@ let routesData = [];
 let networkData = { nodes: [], edges: [] };
 let eventsData = [];
 
+// Setup HiDPI canvas
+function setupCanvas(canvas, ctx) {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.parentElement.getBoundingClientRect();
+    const cssWidth = Math.max(1, Math.floor(rect.width));
+    const cssHeight = Math.max(1, Math.floor(rect.height));
+
+    // Reset transform before resizing so scale does not compound over time.
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    
+    // Set actual size in memory (scaled to account for extra pixel density)
+    canvas.width = Math.round(cssWidth * dpr);
+    canvas.height = Math.round(cssHeight * dpr);
+    
+    // Normalize coordinate system to use css pixels
+    ctx.scale(dpr, dpr);
+    
+    // Set display size (css pixels)
+    canvas.style.width = cssWidth + 'px';
+    canvas.style.height = cssHeight + 'px';
+}
+
+// Initialize canvases
+function initCanvases() {
+    setupCanvas(binsCanvas, binsCtx);
+    setupCanvas(routesCanvas, routesCtx);
+    setupCanvas(networkCanvas, networkCtx);
+}
+
 // Event Listeners
 startBtn.addEventListener('click', startSystem);
 stopBtn.addEventListener('click', stopSystem);
 triggerElectionBtn.addEventListener('click', triggerElection);
+window.addEventListener('resize', () => {
+    initCanvases();
+    drawBinsMap();
+    drawRoutes();
+    drawNetwork();
+});
 
 async function startSystem() {
     const zones = parseInt(document.getElementById('zones').value);
@@ -57,11 +94,11 @@ async function startSystem() {
             isRunning = true;
             updateUIState();
             startUpdates();
-            addEvent('SYSTEM', 'System started with configuration');
+            addEvent('SYSTEM', 'System started');
         }
     } catch (error) {
         console.error('Error starting system:', error);
-        addEvent('SYSTEM', 'Error starting system: ' + error.message);
+        addEvent('SYSTEM', 'Error: ' + error.message);
     }
 }
 
@@ -81,15 +118,14 @@ async function stopSystem() {
 
 async function triggerElection() {
     try {
-        const response = await fetch(`${API_BASE}/api/election/trigger`, {
+        await fetch(`${API_BASE}/api/election/trigger`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ initiator_zone: null })
         });
-        const result = await response.json();
-        addEvent('ELECTION', 'Leader election triggered');
+        addEvent('ELECTION', 'Election triggered');
     } catch (error) {
-        console.error('Error triggering election:', error);
+        console.error('Error:', error);
     }
 }
 
@@ -130,7 +166,6 @@ async function updateAllData() {
     if (!isRunning) return;
     
     try {
-        // Fetch all data in parallel
         const [statusRes, binsRes, routesRes, networkRes, eventsRes] = await Promise.all([
             fetch(`${API_BASE}/api/system/status`),
             fetch(`${API_BASE}/api/bins`),
@@ -152,7 +187,7 @@ async function updateAllData() {
         updateEventLog();
         updateModuleStats(status);
     } catch (error) {
-        console.error('Error updating data:', error);
+        console.error('Error:', error);
     }
 }
 
@@ -162,13 +197,12 @@ function updateStatusDisplay(status) {
         overflowingBinsEl.textContent = status.bin_statistics.overflowing_bins || 0;
     }
     
-    if (status.fog_nodes && status.fog_nodes.system_totals) {
+    if (status.fog_nodes?.system_totals) {
         routesCompletedEl.textContent = status.fog_nodes.system_totals.total_routes_completed || 0;
     }
     
-    if (status.election_status && status.election_status.current_leader) {
-        const leaderId = status.election_status.current_leader;
-        currentLeaderEl.textContent = 'Zone ' + leaderId;
+    if (status.election_status?.current_leader) {
+        currentLeaderEl.textContent = 'Zone ' + status.election_status.current_leader;
         currentLeaderEl.className = 'status-value leader-active';
     } else {
         currentLeaderEl.textContent = 'None';
@@ -178,20 +212,24 @@ function updateStatusDisplay(status) {
 
 function drawBinsMap() {
     const ctx = binsCtx;
-    const width = binsCanvas.width;
-    const height = binsCanvas.height;
+    const width = binsCanvas.parentElement.clientWidth;
+    const height = binsCanvas.parentElement.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
     
-    // Clear canvas
+    // Clear
     ctx.fillStyle = '#0a0f1a';
     ctx.fillRect(0, 0, width, height);
     
     if (!binsData.length) return;
     
-    // Calculate zone positions
     const zones = [...new Set(binsData.map(b => b.zone_id))].sort((a, b) => a - b);
     const zoneWidth = width / zones.length;
+    const maxBinsPerZone = Math.max(...zones.map(z => binsData.filter(b => b.zone_id === z).length));
+    const cols = 5;
+    const binSpacing = Math.min(55, (zoneWidth - 40) / cols);
+    const rowSpacing = Math.min(55, (height - 60) / Math.ceil(maxBinsPerZone / cols));
     
-    // Draw zone separators
+    // Zone separators
     ctx.strokeStyle = '#1e293b';
     ctx.lineWidth = 2;
     for (let i = 1; i < zones.length; i++) {
@@ -202,55 +240,60 @@ function drawBinsMap() {
         ctx.stroke();
     }
     
-    // Draw bins
     zones.forEach((zoneId, zoneIndex) => {
         const zoneBins = binsData.filter(b => b.zone_id === zoneId);
         const startX = zoneIndex * zoneWidth;
         
         zoneBins.forEach((bin, idx) => {
-            const col = idx % 5;
-            const row = Math.floor(idx / 5);
-            const x = startX + 20 + col * 50;
-            const y = 30 + row * 50;
+            const col = idx % cols;
+            const row = Math.floor(idx / cols);
+            const x = startX + 20 + col * binSpacing + binSpacing / 2;
+            const y = 50 + row * rowSpacing + rowSpacing / 2;
             
-            // Bin color based on fill level
             const fill = bin.fill_level;
-            let color;
-            if (fill < 80) color = '#22c55e';
-            else if (fill < 85) color = '#f59e0b';
-            else if (fill < 95) color = '#f97316';
-            else color = '#ef4444';
+            let color, glowColor;
+            if (fill < 80) { color = '#22c55e'; glowColor = 'rgba(34, 197, 94, 0.3)'; }
+            else if (fill < 85) { color = '#f59e0b'; glowColor = 'rgba(245, 158, 11, 0.3)'; }
+            else if (fill < 95) { color = '#f97316'; glowColor = 'rgba(249, 115, 22, 0.3)'; }
+            else { color = '#ef4444'; glowColor = 'rgba(239, 68, 68, 0.3)'; }
             
-            // Draw bin circle
+            // Glow effect
             ctx.beginPath();
-            ctx.arc(x + 15, y + 15, 12, 0, Math.PI * 2);
+            ctx.arc(x, y, 18, 0, Math.PI * 2);
+            ctx.fillStyle = glowColor;
+            ctx.fill();
+            
+            // Bin circle
+            ctx.beginPath();
+            ctx.arc(x, y, 14, 0, Math.PI * 2);
             ctx.fillStyle = color;
             ctx.fill();
-            ctx.strokeStyle = '#334155';
+            ctx.strokeStyle = '#fff';
             ctx.lineWidth = 2;
             ctx.stroke();
             
-            // Draw fill percentage
+            // Percentage
             ctx.fillStyle = '#fff';
-            ctx.font = 'bold 10px Arial';
+            ctx.font = `bold ${Math.max(10, 12 * dpr / 2)}px Arial`;
             ctx.textAlign = 'center';
-            ctx.fillText(Math.round(fill) + '%', x + 15, y + 19);
+            ctx.textBaseline = 'middle';
+            ctx.fillText(Math.round(fill) + '%', x, y + 1);
         });
         
         // Zone label
         ctx.fillStyle = '#3b82f6';
-        ctx.font = 'bold 14px Arial';
+        ctx.font = `bold ${Math.max(14, 16 * dpr / 2)}px Arial`;
         ctx.textAlign = 'center';
-        ctx.fillText('Zone ' + zoneId, startX + zoneWidth / 2, 20);
+        ctx.fillText('Zone ' + zoneId, startX + zoneWidth / 2, 25);
     });
 }
 
 function drawRoutes() {
     const ctx = routesCtx;
-    const width = routesCanvas.width;
-    const height = routesCanvas.height;
+    const width = routesCanvas.parentElement.clientWidth;
+    const height = routesCanvas.parentElement.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
     
-    // Clear canvas
     ctx.fillStyle = '#0a0f1a';
     ctx.fillRect(0, 0, width, height);
     
@@ -261,97 +304,176 @@ function drawRoutes() {
         ctx.fillText('No active routes', width / 2, height / 2);
         return;
     }
-    
-    // Calculate zone positions
-    const zones = [...new Set(routesData.map(r => r.zone_id))].sort((a, b) => a - b);
-    const zoneWidth = width / Math.max(zones.length, 1);
-    
-    routesData.forEach(route => {
-        const zoneIndex = zones.indexOf(route.zone_id);
-        const startX = zoneIndex * zoneWidth;
-        const centerX = startX + zoneWidth / 2;
-        const truckColor = ['#3b82f6', '#8b5cf6', '#f59e0b'][route.zone_id % 3];
-        
-        // Draw truck
-        ctx.fillStyle = truckColor;
-        ctx.fillRect(centerX - 20, 30, 40, 30);
-        ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(centerX - 20, 30, 40, 30);
-        
-        // Truck label
-        ctx.fillStyle = '#fff';
-        ctx.font = 'bold 12px Arial';
+
+    const orderedRoutes = [...routesData].sort((a, b) => {
+        if (a.zone_id !== b.zone_id) return a.zone_id - b.zone_id;
+        return a.truck_id.localeCompare(b.truck_id);
+    });
+
+    const laneCount = orderedRoutes.length;
+    const laneGap = 14;
+    const horizontalPadding = 16;
+    const availableWidth = width - horizontalPadding * 2 - laneGap * (laneCount - 1);
+    const laneWidth = availableWidth / Math.max(laneCount, 1);
+    const colors = ['#7c3aed', '#f59e0b', '#22c55e', '#38bdf8', '#ef4444', '#14b8a6'];
+
+    orderedRoutes.forEach((route, index) => {
+        const laneX = horizontalPadding + index * (laneWidth + laneGap);
+        const laneY = 18;
+        const laneH = height - 36;
+        const laneColor = colors[index % colors.length];
+
+        // Lane card
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.7)';
+        ctx.strokeStyle = 'rgba(71, 85, 105, 0.65)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.roundRect(laneX, laneY, laneWidth, laneH, 12);
+        ctx.fill();
+        ctx.stroke();
+
+        // Header chip
+        const chipW = Math.min(120, laneWidth - 18);
+        const chipX = laneX + (laneWidth - chipW) / 2;
+        ctx.fillStyle = laneColor;
+        ctx.beginPath();
+        ctx.roundRect(chipX, laneY + 12, chipW, 28, 8);
+        ctx.fill();
+        ctx.strokeStyle = '#e2e8f0';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.fillStyle = '#ffffff';
+        ctx.font = `bold ${Math.max(10, 11 * dpr / 2)}px Arial`;
         ctx.textAlign = 'center';
-        ctx.fillText('Truck ' + route.truck_id, centerX, 50);
-        
-        // Draw route bins
-        if (route.bins.length) {
+        ctx.textBaseline = 'middle';
+        const truckLabel = route.truck_id.replace('truck_', 'T');
+        ctx.fillText(`Z${route.zone_id} ${truckLabel}`, laneX + laneWidth / 2, laneY + 26);
+
+        // Truck marker
+        const truckX = laneX + laneWidth / 2;
+        const truckY = laneY + 64;
+        ctx.fillStyle = laneColor;
+        ctx.beginPath();
+        ctx.roundRect(truckX - 18, truckY - 12, 36, 24, 7);
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        const bins = route.bins || [];
+        const routeTop = truckY + 22;
+        const routeBottom = laneY + laneH - 44;
+        const pathHeight = Math.max(60, routeBottom - routeTop);
+        const binSpacing = bins.length ? pathHeight / Math.max(bins.length, 1) : 0;
+        const offset = Math.min(laneWidth * 0.24, 42);
+
+        const points = bins.map((bin, idx) => {
+            const side = idx % 2 === 0 ? -1 : 1;
+            return {
+                x: truckX + side * offset,
+                y: routeTop + binSpacing * (idx + 0.5),
+                bin
+            };
+        });
+
+        // Path segments in visit order
+        let prev = { x: truckX, y: truckY + 12 };
+        ctx.strokeStyle = laneColor;
+        ctx.lineWidth = 2.5;
+        ctx.setLineDash([7, 5]);
+        points.forEach((point) => {
+            const controlX = (prev.x + point.x) / 2;
+            const controlY = prev.y + (point.y - prev.y) * 0.15;
             ctx.beginPath();
-            ctx.moveTo(centerX, 60);
-            
-            route.bins.forEach((bin, idx) => {
-                const binY = 100 + idx * 35;
-                const binX = centerX + (idx % 2 === 0 ? -30 : 30);
-                
-                ctx.lineTo(binX, binY);
-                
-                // Draw bin point
-                ctx.fillStyle = '#ef4444';
-                ctx.beginPath();
-                ctx.arc(binX, binY, 8, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.stroke();
-                
-                // Bin label
-                ctx.fillStyle = '#fff';
-                ctx.font = '10px Arial';
-                ctx.fillText(bin.bin_id.split('_').slice(1).join('_'), binX + 12, binY + 3);
-            });
-            
-            ctx.strokeStyle = truckColor;
-            ctx.lineWidth = 2;
+            ctx.moveTo(prev.x, prev.y);
+            ctx.quadraticCurveTo(controlX, controlY, point.x, point.y);
             ctx.stroke();
-        }
-        
-        // Route info
+            prev = point;
+        });
+        ctx.setLineDash([]);
+
+        // Bin markers
+        points.forEach((point, idx) => {
+            ctx.beginPath();
+            ctx.arc(point.x, point.y, 13, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(239, 68, 68, 0.26)';
+            ctx.fill();
+
+            ctx.beginPath();
+            ctx.arc(point.x, point.y, 10.5, 0, Math.PI * 2);
+            ctx.fillStyle = '#ef4444';
+            ctx.fill();
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 1.8;
+            ctx.stroke();
+
+            ctx.fillStyle = '#ffffff';
+            ctx.font = `bold ${Math.max(9, 10 * dpr / 2)}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(String(idx + 1), point.x, point.y + 0.5);
+        });
+
+        // Route summary
         ctx.fillStyle = '#94a3b8';
-        ctx.font = '11px Arial';
-        ctx.fillText(route.bin_count + ' bins, ' + route.total_distance.toFixed(1) + ' units', centerX, height - 30);
+        ctx.font = `${Math.max(10, 11 * dpr / 2)}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.fillText(
+            `${route.bin_count} bins | ${route.total_distance.toFixed(1)} km`,
+            laneX + laneWidth / 2,
+            laneY + laneH - 18
+        );
     });
 }
 
 function drawNetwork() {
     const ctx = networkCtx;
-    const width = networkCanvas.width;
-    const height = networkCanvas.height;
+    const width = networkCanvas.parentElement.clientWidth;
+    const height = networkCanvas.parentElement.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
     
-    // Clear canvas
     ctx.fillStyle = '#0a0f1a';
     ctx.fillRect(0, 0, width, height);
     
     if (!networkData.nodes.length) return;
-    
+
+    const topPadding = 58;
+    const bottomPadding = 54;
+    const sidePadding = 58;
+    const layoutHeight = Math.max(80, height - topPadding - bottomPadding);
     const centerX = width / 2;
-    const centerY = height / 2;
-    const radius = Math.min(width, height) / 3;
+    const centerY = topPadding + layoutHeight / 2;
+    const radius = Math.max(
+        50,
+        Math.min((width - sidePadding * 2) / 2, layoutHeight / 2) - 38
+    );
     const nodePositions = {};
-    
-    // Calculate node positions in a circle
-    networkData.nodes.forEach((node, index) => {
-        const angle = (index / networkData.nodes.length) * Math.PI * 2 - Math.PI / 2;
+
+    const nodes = [...networkData.nodes].sort((a, b) => Number(a.id) - Number(b.id));
+
+    // Calculate node positions in a padded circle to avoid clipping.
+    nodes.forEach((node, index) => {
+        const angle = (index / nodes.length) * Math.PI * 2 - Math.PI / 2;
         nodePositions[node.id] = {
             x: centerX + Math.cos(angle) * radius,
             y: centerY + Math.sin(angle) * radius
         };
     });
     
-    // Draw edges (peer connections)
-    ctx.strokeStyle = '#334155';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([5, 5]);
-    
+    // Draw unique connection lines.
+    ctx.strokeStyle = 'rgba(100, 116, 139, 0.55)';
+    ctx.lineWidth = 2.2;
+    ctx.setLineDash([8, 4]);
+
+    const drawnEdges = new Set();
     networkData.edges.forEach(edge => {
+        const minNode = Math.min(edge.from, edge.to);
+        const maxNode = Math.max(edge.from, edge.to);
+        const edgeKey = `${minNode}-${maxNode}`;
+        if (drawnEdges.has(edgeKey)) return;
+        drawnEdges.add(edgeKey);
+
         const from = nodePositions[edge.from];
         const to = nodePositions[edge.to];
         if (from && to) {
@@ -365,60 +487,91 @@ function drawNetwork() {
     ctx.setLineDash([]);
     
     // Draw nodes
-    networkData.nodes.forEach(node => {
+    const nodeRadius = Math.max(26, Math.min(42, radius / 2.8));
+    
+    nodes.forEach(node => {
         const pos = nodePositions[node.id];
         if (!pos) return;
         
+        // Outer glow for leader
+        if (node.is_leader) {
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, nodeRadius + 8, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(251, 191, 36, 0.3)';
+            ctx.fill();
+        }
+        
         // Node circle
         ctx.beginPath();
-        ctx.arc(pos.x, pos.y, 35, 0, Math.PI * 2);
-        ctx.fillStyle = node.is_leader ? '#fbbf24' : '#3b82f6';
+        ctx.arc(pos.x, pos.y, nodeRadius, 0, Math.PI * 2);
+        const gradient = ctx.createRadialGradient(
+            pos.x - nodeRadius/3, pos.y - nodeRadius/3, 0,
+            pos.x, pos.y, nodeRadius
+        );
+        if (node.is_leader) {
+            gradient.addColorStop(0, '#fcd34d');
+            gradient.addColorStop(1, '#f59e0b');
+        } else {
+            gradient.addColorStop(0, '#60a5fa');
+            gradient.addColorStop(1, '#3b82f6');
+        }
+        ctx.fillStyle = gradient;
         ctx.fill();
         ctx.strokeStyle = '#fff';
         ctx.lineWidth = 3;
         ctx.stroke();
         
-        // Inner circle for state
+        // Inner circle
         ctx.beginPath();
-        ctx.arc(pos.x, pos.y, 25, 0, Math.PI * 2);
+        ctx.arc(pos.x, pos.y, nodeRadius * 0.6, 0, Math.PI * 2);
         ctx.fillStyle = '#1e293b';
         ctx.fill();
         
-        // Node label
+        // Zone label
         ctx.fillStyle = '#fff';
-        ctx.font = 'bold 16px Arial';
+        ctx.font = `bold ${Math.max(14, 18 * dpr / 2)}px Arial`;
         ctx.textAlign = 'center';
-        ctx.fillText('Z' + node.id, pos.x, pos.y + 5);
+        ctx.textBaseline = 'middle';
+        ctx.fillText('Z' + node.id, pos.x, pos.y);
         
-        // Leader indicator (L) instead of crown
+        // Leader badge
         if (node.is_leader) {
             ctx.fillStyle = '#fbbf24';
-            ctx.font = 'bold 14px Arial';
-            ctx.fillText('L', pos.x, pos.y - 45);
+            ctx.font = `bold ${Math.max(10, 12 * dpr / 2)}px Arial`;
+            ctx.fillText('LEADER', pos.x, pos.y - nodeRadius - 15);
         }
         
-        // Status below
+        // State label
         ctx.fillStyle = '#94a3b8';
-        ctx.font = '10px Arial';
-        ctx.fillText(node.state, pos.x, pos.y + 50);
+        ctx.font = `${Math.max(9, 11 * dpr / 2)}px Arial`;
+        ctx.fillText(node.state, pos.x, pos.y + nodeRadius + 16);
     });
     
     // Legend
-    ctx.font = '12px Arial';
+    const legendY = height - 18;
+    ctx.font = `${Math.max(11, 12 * dpr / 2)}px Arial`;
+    
     ctx.fillStyle = '#fbbf24';
-    ctx.fillText('* Leader', 20, height - 40);
+    ctx.beginPath();
+    ctx.arc(25, legendY - 4, 8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillText('Leader', 40, legendY);
+    
     ctx.fillStyle = '#3b82f6';
-    ctx.fillText('* Follower', 20, height - 20);
+    ctx.beginPath();
+    ctx.arc(100, legendY - 4, 8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillText('Follower', 115, legendY);
 }
 
 function updateEventLog() {
     eventLogEl.innerHTML = '';
     
-    eventsData.forEach(event => {
+    eventsData.slice(-20).forEach(event => {
         const eventEl = document.createElement('div');
         eventEl.className = 'event-item';
         
-        const time = new Date(event.timestamp).toLocaleTimeString();
+        const time = new Date(event.timestamp).toLocaleTimeString([], { hour12: false });
         const typeClass = 'event-type-' + event.type;
         
         eventEl.innerHTML = '<span class="event-timestamp">' + time + '</span>' +
@@ -428,24 +581,21 @@ function updateEventLog() {
         eventLogEl.appendChild(eventEl);
     });
     
-    // Auto-scroll to bottom
     eventLogEl.scrollTop = eventLogEl.scrollHeight;
 }
 
 function addEvent(type, message) {
-    const event = {
+    eventsData.push({
         timestamp: new Date().toISOString(),
         type: type,
         message: message
-    };
-    eventsData.push(event);
-    if (eventsData.length > 50) eventsData.shift();
+    });
+    if (eventsData.length > 100) eventsData.shift();
     updateEventLog();
 }
 
 function updateModuleStats(status) {
-    // Route stats
-    if (status.fog_nodes && status.fog_nodes.system_totals) {
+    if (status.fog_nodes?.system_totals) {
         const totals = status.fog_nodes.system_totals;
         const activeRoutes = Object.values(status.fog_nodes.nodes || {}).reduce(
             (sum, node) => sum + (node.zone_status?.active_routes || 0), 0
@@ -454,11 +604,10 @@ function updateModuleStats(status) {
             '<span>Active: ' + activeRoutes + '</span>' +
             '<span>Completed: ' + (totals.total_routes_completed || 0) + '</span>';
         document.getElementById('comm-stats').innerHTML = 
-            '<span>Peers: ' + (Object.keys(status.fog_nodes.nodes || {}).length - 1) + '</span>' +
+            '<span>Peers: ' + Math.max(0, Object.keys(status.fog_nodes.nodes || {}).length - 1) + '</span>' +
             '<span>Spillovers: ' + (totals.total_spillovers || 0) + '</span>';
     }
     
-    // Election stats
     if (status.election_status) {
         const election = status.election_status;
         const leaderNode = Object.values(election.nodes || {}).find(n => n.state === 'LEADER');
@@ -468,13 +617,7 @@ function updateModuleStats(status) {
     }
 }
 
-// Handle window resize
-window.addEventListener('resize', () => {
-    drawBinsMap();
-    drawRoutes();
-    drawNetwork();
-});
-
-// Initial state
+// Initialize
+initCanvases();
 updateUIState();
-addEvent('SYSTEM', 'Web UI loaded. Click Start System to begin.');
+addEvent('SYSTEM', 'Web UI ready. Click Start System to begin.');

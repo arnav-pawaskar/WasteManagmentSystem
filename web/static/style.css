@@ -237,11 +237,28 @@ header h1 {
 .color-box.high { background: #f97316; }
 .color-box.critical { background: #ef4444; }
 
-/* Canvas */
-canvas {
+/* Canvas Container for HiDPI */
+.canvas-container {
+    position: relative;
     width: 100%;
-    border-radius: 8px;
+    height: 350px;
     background: #0a0f1a;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.canvas-container.network-canvas-container {
+    height: 400px;
+}
+
+.routes-view .canvas-container {
+    height: 420px;
+}
+
+canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
 }
 
 /* Network Controls */
