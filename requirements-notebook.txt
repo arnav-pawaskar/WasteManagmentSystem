@@ -1,0 +1,5 @@
+# Dependencies for Distributed_Waste_Management_System.ipynb
+# (all pre-installed on Google Colab — this file is for local runs)
+numpy>=1.24
+pandas>=2.0
+matplotlib>=3.7
