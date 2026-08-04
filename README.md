@@ -4,11 +4,12 @@ A distributed fog computing system for optimizing garbage truck routes and manag
 
 ## System Overview
 
-This system demonstrates a complete fog-based architecture with three core modules:
+This system demonstrates a complete fog-based architecture with four core modules:
 
-1. **Route Optimization Module** - Computes optimal garbage truck routes using Nearest Neighbour algorithm
-2. **Inter-Fog Communication Module** - Enables peer discovery, state gossip, and load balancing between zones
-3. **Election Module** - Implements leader election for coordinating cross-zone decisions (placeholder for teammate implementation)
+1. **Route Optimization Module** - Computes garbage truck routes using the Nearest Neighbour heuristic over priority-ranked bins
+2. **Inter-Fog Communication Module** - Peer discovery, gossip-based state sharing, and spillover load balancing between zones
+3. **Election Module** - Invitation leader election for coordinating cross-zone decisions
+4. **Blockchain Ledger** - Permissioned, append-only, hash-chained audit trail of every operational event
 
 ## Reproducing the Paper's Results
 
@@ -34,17 +35,19 @@ not re-implement the threaded fog-node runtime (peer discovery, gossip transport
 election, message routing) that lives under `modules/`. Section V therefore reports
 algorithmic behaviour, not end-to-end distributed-system behaviour.
 
-Two known divergences between the notebook and this repository, both tracked as
-repository bugs:
+One known divergence remains between the notebook and this repository:
 
-| | Notebook (matches paper) | `modules/` |
+| | Notebook | `modules/` |
 |---|---|---|
-| Priority thresholds | 90 / 80 / 60 | 95 / 85 / 80 |
 | Bin geometry | all zones share one 100x100 area | zone *z* offset to `x = (z-1)*100` |
 
-Absolute route distances are not directly comparable between the two because of the
-geometry difference; the relative NN-vs-baseline comparison is unaffected, since both
-arms of the comparison use identical bin positions.
+Absolute route distances are therefore not directly comparable between the two. The
+relative NN-vs-baseline comparison reported in Section V-A is unaffected, because both
+arms of that comparison use identical bin positions.
+
+(The priority thresholds previously differed — the notebook used the paper's 90/80/60
+tiers while `modules/route_optimizer/priority.py` used 95/85/80. The repository has been
+corrected to match the paper.)
 
 ## Architecture
 
@@ -65,24 +68,59 @@ Smart Bin Simulator
         |   |-- spillover.py (Load balancing)
         |   +-- messaging.py (Message routing)
         |
-        +-- Election Module (Teammate implementation)
+        +-- Election Module
+        |   |-- invitation_election.py (Invitation leader election)
+        |   |-- leader_manager.py (Election coordination, heartbeats)
+        |   +-- node_state.py (Election state machine)
+        |
+        +-- Blockchain Ledger (contracts/ledger.py)
+        |   |-- Append-only hash-chained blocks
+        |   |-- SHA-256 payload hashes, per-node signatures
+        |   +-- Quorum endorsement over a fixed validator set
         |
         v
 Truck Route Output
 ```
+
+### Blockchain Ledger
+
+Every bin service confirmation, route completion, spillover transfer, and zone-state
+snapshot is committed to a permissioned append-only ledger
+([`contracts/ledger.py`](contracts/ledger.py)). Each transaction carries the event type,
+zone ID, timestamp, and a SHA-256 hash of its payload, and is signed by the committing
+fog node. Blocks are linked by hash, carry a Merkle root over their transactions, and
+commit only after endorsement by a quorum of the validator set.
+
+Any stakeholder can audit the chain independently:
+
+```python
+ok, problems = fog_simulator.ledger.verify_chain()
+```
+
+This checks hash linkage, block hashes, Merkle roots, payload integrity, committer
+signatures, and endorsement quorum. `tests/test_ledger.py` includes tamper-detection
+tests covering payload modification, transaction deletion, forged signatures, broken
+linkage, and stripped endorsements.
+
+**Limitations** (also stated in Section V-E of the paper): signatures are HMAC-SHA256,
+a symmetric scheme, so verification also confers signing capability — a production
+deployment needs asymmetric signatures. Quorum endorsement is PBFT-shaped (2f+1 of
+3f+1) but is not a PBFT implementation: there is no view change or primary election.
+The ledger is in-process, with no network consensus, no persistence, and no integration
+with a platform such as Hyperledger Fabric.
 
 ## Features
 
 ### Route Optimization
 - **Nearest Neighbour Algorithm**: Simple, deterministic route planning
 - **Dynamic Replanning**: Automatically recalculate routes when new bins overflow
-- **Priority Management**: Bins prioritized by fill level (critical > high > medium > low)
+- **Priority Management**: Four tiers by fill level -- Critical (>=90%), High (80-90%), Medium (60-80%), Low (<60%). Only Critical and High are routed in the current cycle; Medium is deferred unless spare truck capacity exists
 - **Multi-Truck Support**: Distribute bins among multiple trucks per zone
 
 ### Inter-Fog Communication
 - **Peer Discovery**: Automatic detection of other fog nodes
 - **Gossip Protocol**: Share zone state information across the network
-- **Load Balancing**: Transfer bins between overloaded and underloaded zones
+- **Load Balancing**: Transfer bin *ownership* between overloaded and underloaded zones, with one outstanding request at a time and a load-ordered peer walk on rejection
 - **Message Routing**: Reliable message delivery between nodes
 
 ### System Integration
@@ -95,7 +133,9 @@ Truck Route Output
 
 ### Prerequisites
 - Python 3.7+
-- No external dependencies required (uses only standard library)
+- Core system and ledger: standard library only (`hashlib`, `hmac`, `threading`)
+- Web UI: `pip install -r web/requirements.txt`
+- Notebook: `pip install -r requirements-notebook.txt`
 
 ### Installation
 ```bash
@@ -132,11 +172,14 @@ python demo.py --scenario high-load
 
 ### Running Tests
 ```bash
-# Route optimization tests
-python tests/test_route_optimization.py
+python -m unittest discover -s tests -p "test_*.py"
+```
 
-# Inter-fog communication tests
-python tests/test_inter_fog_comm.py
+Or individually:
+```bash
+python tests/test_route_optimization.py   # routing, priority tiers, route manager
+python tests/test_inter_fog_comm.py       # peer discovery, gossip, spillover
+python tests/test_ledger.py               # ledger commit, audit, tamper detection
 ```
 
 ## Project Structure
@@ -158,18 +201,24 @@ fog-waste-system/
 |   |   |-- spillover.py       # Load balancing
 |   |   +-- messaging.py       # Message routing
 |   |
-|   +-- election_module/       # Teammate implementation
+|   +-- election_module/
+|       |-- __init__.py
+|       |-- invitation_election.py  # Invitation leader election
+|       |-- leader_manager.py       # Election coordination
+|       +-- node_state.py           # Election state machine
 |
 |-- simulation/
 |   |-- bin_simulator.py       # Synthetic bin data generation
 |   +-- fog_node_simulator.py  # Multi-node simulation
 |
 |-- contracts/
-|   +-- message_types.py       # Shared data structures
+|   |-- message_types.py       # Shared data structures
+|   +-- ledger.py              # Permissioned blockchain ledger
 |
 |-- tests/
 |   |-- test_route_optimization.py
-|   +-- test_inter_fog_comm.py
+|   |-- test_inter_fog_comm.py
+|   +-- test_ledger.py
 |
 |-- main.py                     # System entry point
 |-- demo.py                     # Demo scenarios
@@ -324,10 +373,13 @@ python -m unittest discover tests/
 - Add fault tolerance mechanisms
 
 ### Election Module
-- Complete invitation election algorithm
-- Add leader health monitoring
-- Implement automatic failover
-- Add election conflict resolution
+- Add richer election conflict resolution
+- Harden failover under partial network partitions
+
+### Blockchain
+- Replace HMAC signatures with asymmetric (ECDSA) signing
+- Add persistence and a full PBFT view-change protocol
+- Integrate with a production platform such as Hyperledger Fabric
 
 ## Performance Considerations
 
@@ -365,4 +417,6 @@ This project is for educational purposes. Feel free to use and modify as needed.
 
 ---
 
-**Note**: The Election Module is designed for teammate implementation. The current system includes placeholder interfaces and demonstrates integration patterns for the complete system.
+**Note**: All four modules are implemented. Section V of the accompanying paper is
+evaluated by the seeded notebook rather than by this runtime; see *Reproducing the
+Paper's Results* above for the scope of that distinction.

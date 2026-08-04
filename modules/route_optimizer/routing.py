@@ -118,16 +118,18 @@ class RouteOptimizer:
         Returns:
             Updated RoutePlan
         """
-        # Get all overflowing bins including the new one
-        overflowing_bins = [bin_telemetry for bin_telemetry in all_bins 
-                           if bin_telemetry.is_overflowing(self.overflow_threshold)]
-        
-        # If the new bin is already in the list, just return current route
+        # If the new bin is already routed, nothing to replan
         if new_overflowing_bin.bin_id in current_route.route_bins:
             return current_route
-        
-        # Recompute the entire route with all overflowing bins
-        return self.compute_route(overflowing_bins, truck_position, 
+
+        # Merge the newly-overflowing bin into the candidate set. It may not yet be
+        # present in all_bins (the caller can observe an overflow before the zone's
+        # bin registry is refreshed), so it is added explicitly rather than assumed.
+        candidates = {bin_telemetry.bin_id: bin_telemetry for bin_telemetry in all_bins}
+        candidates[new_overflowing_bin.bin_id] = new_overflowing_bin
+
+        # compute_route filters for overflowing bins itself
+        return self.compute_route(list(candidates.values()), truck_position,
                                 current_route.truck_id, current_route.zone_id)
     
     def get_route_statistics(self, route_plan: RoutePlan) -> dict:

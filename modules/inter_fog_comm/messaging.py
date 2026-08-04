@@ -12,10 +12,22 @@ class MessageRouter:
         # Message handlers
         self.handlers: Dict[str, Callable] = {}
         self.message_queue: List[Dict] = []
-        
-        # Message tracking
+
+        # Message tracking. Capped: a fog node runs indefinitely, and unbounded
+        # per-message dicts were the main source of memory growth over long runs.
         self.sent_messages: Dict[str, Dict] = {}
         self.received_messages: Dict[str, Dict] = {}
+        self.max_tracked = 1000
+        self.total_sent = 0
+        self.total_received = 0
+
+    @staticmethod
+    def _trim(store: Dict[str, Dict], limit: int):
+        """Drop oldest entries once the store exceeds its cap (dicts keep insertion order)."""
+        excess = len(store) - limit
+        if excess > 0:
+            for key in list(store)[:excess]:
+                del store[key]
     
     def register_handler(self, message_type: str, handler: Callable):
         """Register a handler for a specific message type"""
@@ -39,7 +51,9 @@ class MessageRouter:
         }
         
         self.sent_messages[message_id] = message
-        
+        self.total_sent += 1
+        self._trim(self.sent_messages, self.max_tracked)
+
         print(f"Zone {self.zone_id}: Sending {message_type} to Zone {target_zone}")
         
         # In real implementation, this would send over network
@@ -63,7 +77,9 @@ class MessageRouter:
         # Record message
         message["status"] = "received"
         self.received_messages[message_id] = message
-        
+        self.total_received += 1
+        self._trim(self.received_messages, self.max_tracked)
+
         print(f"Zone {self.zone_id}: Received {message_type} from Zone {message['sender']}")
         
         # Handle message
@@ -109,8 +125,9 @@ class MessageRouter:
             received_stats[msg_type] += 1
         
         return {
-            "messages_sent": len(self.sent_messages),
-            "messages_received": len(self.received_messages),
+            "messages_sent": self.total_sent,
+            "messages_received": self.total_received,
+            "messages_tracked": len(self.sent_messages) + len(self.received_messages),
             "messages_pending": len(self.get_pending_messages()),
             "sent_by_type": sent_stats,
             "received_by_type": received_stats
@@ -149,6 +166,8 @@ class InterFogCommunicator:
     def _handle_zone_state(self, zone_state: ZoneState, sender_zone: int):
         """Handle incoming zone state gossip"""
         self.gossip_protocol.receive_gossip(sender_zone, zone_state)
+        # Registering also refreshes the peer's heartbeat, so an active gossip
+        # stream keeps a peer alive and a previously timed-out peer is readmitted.
         self.peer_discovery.register_peer(zone_state)
     
     def _handle_spillover_request(self, request: SpilloverRequest, sender_zone: int):
@@ -184,12 +203,10 @@ class InterFogCommunicator:
         
         # Update gossip protocol
         self.gossip_protocol.update_local_state(self.current_state)
-        
-        # Broadcast state to all discovered peers
-        peers = self.peer_discovery.discover_peers()
-        if peers:
-            self.broadcast_to_peers("zone_state", self.current_state)
-        
+
+        # Push state to a random subset of peers (rumour-mongering, Section IV-C)
+        self.gossip_to_peers(self.current_state)
+
         # Check for spillover needs
         self._check_spillover_needs()
     
@@ -213,13 +230,24 @@ class InterFogCommunicator:
                 request
             )
     
+    def gossip_to_peers(self, message_data: Any):
+        """
+        Push zone state to a randomly chosen subset of peers.
+
+        Targets are drawn from live peers plus the configured roster, so a peer that
+        has timed out still receives state and can be rediscovered.
+        """
+        targets = self.gossip_protocol.select_gossip_targets(
+            self.peer_discovery.presence_targets())
+
+        for zone_id in targets:
+            self.message_router.send_message(zone_id, "zone_state", message_data)
+
     def broadcast_to_peers(self, message_type: str, message_data: Any):
-        """Broadcast message to all known peers"""
-        peers = self.peer_discovery.discover_peers()
-        
-        for peer in peers:
+        """Send a message to every known peer (used for non-gossip traffic)"""
+        for zone_id in self.peer_discovery.presence_targets():
             self.message_router.send_message(
-                peer.zone_id,
+                zone_id,
                 message_type,
                 message_data
             )

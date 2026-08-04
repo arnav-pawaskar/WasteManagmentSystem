@@ -1,5 +1,6 @@
 import threading
 import time
+import random
 from typing import Dict, List, Callable
 from datetime import datetime
 from contracts.message_types import ZoneState
@@ -7,9 +8,14 @@ from contracts.message_types import ZoneState
 class GossipProtocol:
     """Implements gossip protocol for sharing zone state between fog nodes"""
     
-    def __init__(self, zone_id: int, gossip_interval: int = 15):
+    def __init__(self, zone_id: int, gossip_interval: int = 15, gossip_fanout: int = 3):
         self.zone_id = zone_id
         self.gossip_interval = gossip_interval
+        # Rumour-mongering fanout: each round pushes state to at most this many
+        # randomly chosen peers rather than broadcasting to all of them. Constant
+        # fanout is what gives the O(log N) rounds-to-convergence result of Demers
+        # et al.; a full broadcast would not.
+        self.gossip_fanout = gossip_fanout
         self.running = False
         
         # State management
@@ -84,6 +90,19 @@ class GossipProtocol:
         # For simulation, this is handled by the fog node simulator
         return message_id
     
+    def select_gossip_targets(self, peer_ids, fanout: int = None) -> List[int]:
+        """
+        Choose a random subset of peers to push state to this round.
+
+        Returns every candidate when the network is smaller than the fanout, which
+        is the degenerate case for the paper's default 3-zone configuration.
+        """
+        fanout = self.gossip_fanout if fanout is None else fanout
+        candidates = [z for z in peer_ids if z != self.zone_id]
+        if fanout <= 0 or len(candidates) <= fanout:
+            return list(candidates)
+        return random.sample(candidates, fanout)
+
     def get_peer_states(self) -> Dict[int, ZoneState]:
         """Get all known peer states"""
         return self.peer_states.copy()
@@ -158,7 +177,7 @@ class GossipProtocol:
         expired_messages = []
         
         for message_id, timestamp in self.gossip_history.items():
-            if (current_time - timestamp).seconds > self.history_cleanup_interval:
+            if (current_time - timestamp).total_seconds() > self.history_cleanup_interval:
                 expired_messages.append(message_id)
         
         for message_id in expired_messages:
@@ -186,6 +205,3 @@ class GossipProtocol:
         """Stop the gossip service"""
         self.running = False
         print(f"Zone {self.zone_id}: Gossip service stopped")
-
-# Add missing import
-import random

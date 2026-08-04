@@ -7,6 +7,7 @@ Main entry point for the complete system simulation
 import time
 import signal
 import sys
+import threading
 from datetime import datetime
 from simulation.bin_simulator import BinSimulator
 from simulation.fog_node_simulator import FogNodeSimulator
@@ -209,8 +210,7 @@ class SmartWasteManagementSystem:
 def main():
     """Main entry point"""
     import argparse
-    import threading
-    
+
     parser = argparse.ArgumentParser(description='Fog-Based Smart Waste Management System')
     parser.add_argument('--zones', type=int, default=3, help='Number of zones (default: 3)')
     parser.add_argument('--bins-per-zone', type=int, default=15, help='Bins per zone (default: 15)')
@@ -282,5 +282,4 @@ def main():
         system.run_demo(args.demo_duration)
 
 if __name__ == "__main__":
-    import threading
     main()

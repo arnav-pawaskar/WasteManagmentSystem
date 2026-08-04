@@ -69,41 +69,65 @@ class TestRouteOptimizer(unittest.TestCase):
 class TestBinPriorityManager(unittest.TestCase):
     
     def setUp(self):
+        # Tiers per Section IV-B: Critical >=90, High 80-90, Medium 60-80, Low <60
         self.priority_manager = BinPriorityManager()
         self.test_bins = [
             BinTelemetry("bin_1", 1, 10.0, 10.0, 96.0, datetime.now()),  # critical
             BinTelemetry("bin_2", 1, 20.0, 20.0, 87.0, datetime.now()),  # high
-            BinTelemetry("bin_3", 1, 15.0, 25.0, 82.0, datetime.now()),  # medium
-            BinTelemetry("bin_4", 1, 30.0, 15.0, 77.0, datetime.now()),  # low (not overflowing)
+            BinTelemetry("bin_3", 1, 15.0, 25.0, 72.0, datetime.now()),  # medium
+            BinTelemetry("bin_4", 1, 30.0, 15.0, 41.0, datetime.now()),  # low
         ]
-    
+
     def test_priority_classification(self):
-        """Test bin priority classification"""
-        critical = self.priority_manager.get_bin_priority(self.test_bins[0])
-        high = self.priority_manager.get_bin_priority(self.test_bins[1])
-        medium = self.priority_manager.get_bin_priority(self.test_bins[2])
-        
-        self.assertEqual(critical, 'critical')
-        self.assertEqual(high, 'high')
-        self.assertEqual(medium, 'medium')
-    
+        """Test bin priority classification against the paper's tiers"""
+        got = [self.priority_manager.get_bin_priority(b) for b in self.test_bins]
+        self.assertEqual(got, ['critical', 'high', 'medium', 'low'])
+
+    def test_tier_boundaries_are_inclusive_below(self):
+        """A bin exactly on a boundary belongs to the higher tier"""
+        cases = [(90.0, 'critical'), (89.9, 'high'), (80.0, 'high'),
+                 (79.9, 'medium'), (60.0, 'medium'), (59.9, 'low')]
+        for fill, expected in cases:
+            b = BinTelemetry("b", 1, 0.0, 0.0, fill, datetime.now())
+            self.assertEqual(self.priority_manager.get_bin_priority(b), expected,
+                             f"fill_level {fill}")
+
     def test_priority_sorting(self):
         """Test sorting bins by priority"""
         sorted_bins = self.priority_manager.sort_bins_by_priority(self.test_bins)
-        
-        # Should be in order: critical, high, medium
-        self.assertEqual(self.priority_manager.get_bin_priority(sorted_bins[0]), 'critical')
-        self.assertEqual(self.priority_manager.get_bin_priority(sorted_bins[1]), 'high')
-        self.assertEqual(self.priority_manager.get_bin_priority(sorted_bins[2]), 'medium')
-    
+
+        self.assertEqual(
+            [self.priority_manager.get_bin_priority(b) for b in sorted_bins],
+            ['critical', 'high', 'medium', 'low'])
+
+    def test_sorting_breaks_ties_by_fill_level(self):
+        """Within a tier, fuller bins sort first"""
+        bins = [
+            BinTelemetry("a", 1, 0.0, 0.0, 82.0, datetime.now()),
+            BinTelemetry("b", 1, 0.0, 0.0, 88.0, datetime.now()),
+            BinTelemetry("c", 1, 0.0, 0.0, 85.0, datetime.now()),
+        ]
+        order = [b.bin_id for b in self.priority_manager.sort_bins_by_priority(bins)]
+        self.assertEqual(order, ["b", "c", "a"])
+
+    def test_only_critical_and_high_are_routable(self):
+        """Section IV-B: Medium and Low are deferred"""
+        routable = self.priority_manager.get_routable_bins(self.test_bins)
+        self.assertEqual([b.bin_id for b in routable], ["bin_1", "bin_2"])
+
+    def test_spare_capacity_promotes_medium_but_never_low(self):
+        routable = self.priority_manager.get_routable_bins(self.test_bins,
+                                                           spare_capacity=5)
+        self.assertEqual([b.bin_id for b in routable], ["bin_1", "bin_2", "bin_3"])
+
     def test_priority_distribution(self):
-        """Test priority distribution calculation"""
+        """Distribution spans all four tiers"""
         distribution = self.priority_manager.get_priority_distribution(self.test_bins)
-        
+
         self.assertEqual(distribution['critical'], 1)
         self.assertEqual(distribution['high'], 1)
         self.assertEqual(distribution['medium'], 1)
-        self.assertEqual(distribution['low'], 0)  # bin_4 is not overflowing
+        self.assertEqual(distribution['low'], 1)
 
 class TestRouteManager(unittest.TestCase):
     

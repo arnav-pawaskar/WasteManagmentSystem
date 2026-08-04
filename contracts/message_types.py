@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 from datetime import datetime
 from enum import Enum
@@ -60,11 +60,18 @@ class ElectionMessage:
 
 @dataclass
 class SpilloverRequest:
-    """Request to transfer bins to another zone"""
+    """
+    Request to transfer bins to another zone.
+
+    `bins` carries the telemetry for the bins named in `bin_ids` so that an accepting
+    peer can actually take ownership of them. Without it a spillover can only be
+    recorded, not performed.
+    """
     sender_zone: int
     receiver_zone: int
     bin_ids: List[str]
     timestamp: datetime
+    bins: List['BinTelemetry'] = field(default_factory=list)
 
 @dataclass
 class SpilloverResponse:

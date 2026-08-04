@@ -76,9 +76,9 @@ def run_basic_demo():
     start_time = datetime.now()
     
     try:
-        while (datetime.now() - start_time).seconds < demo_duration:
+        while (datetime.now() - start_time).total_seconds() < demo_duration:
             # Print status every 20 seconds
-            if (datetime.now() - start_time).seconds % 20 == 0:
+            if (datetime.now() - start_time).total_seconds() % 20 == 0:
                 print(f"\n[{datetime.now().strftime('%H:%M:%S')}] System Status:")
                 
                 # Bin statistics

@@ -114,7 +114,9 @@ class SmartWasteSystem:
     def get_bins_data(self):
         """Get all bin data for visualization"""
         bins_data = []
-        for bin_id, bin_telemetry in self.bin_simulator.bins.items():
+        # Snapshot before iterating: simulation threads mutate these collections
+        # concurrently with Flask request threads.
+        for bin_id, bin_telemetry in list(self.bin_simulator.bins.items()):
             bins_data.append({
                 "bin_id": bin_id,
                 "zone_id": bin_telemetry.zone_id,
@@ -129,22 +131,22 @@ class SmartWasteSystem:
     def get_routes_data(self):
         """Get all active routes"""
         routes_data = []
-        for zone_id, node in self.fog_simulator.fog_nodes.items():
-            for truck_id, route in node.route_manager.active_routes.items():
+        for zone_id, node in list(self.fog_simulator.fog_nodes.items()):
+            # active_routes is mutated by the node's operation thread (routes are
+            # added and deleted as trucks are dispatched), so iterating it live
+            # raises "dictionary changed size during iteration" under load.
+            zone_bins = {b.bin_id: b for b in list(node.zone_bins)}
+            for truck_id, route in list(node.route_manager.active_routes.items()):
                 route_bins = []
-                for bin_id in route.route_bins:
-                    bin_telemetry = node.zone_bins[0] if node.zone_bins else None
-                    for b in node.zone_bins:
-                        if b.bin_id == bin_id:
-                            bin_telemetry = b
-                            break
+                for bin_id in list(route.route_bins):
+                    bin_telemetry = zone_bins.get(bin_id)
                     if bin_telemetry:
                         route_bins.append({
                             "bin_id": bin_id,
                             "x": bin_telemetry.x,
                             "y": bin_telemetry.y
                         })
-                
+
                 routes_data.append({
                     "zone_id": zone_id,
                     "truck_id": truck_id,
@@ -158,8 +160,8 @@ class SmartWasteSystem:
         """Get fog node network topology"""
         nodes = []
         edges = []
-        
-        for zone_id, node in self.fog_simulator.fog_nodes.items():
+
+        for zone_id, node in list(self.fog_simulator.fog_nodes.items()):
             is_leader = node.is_leader
             election_status = node.get_election_status()
             
@@ -307,4 +309,4 @@ if __name__ == '__main__':
     system_instance = SmartWasteSystem()
     
     # Start the Flask server
-    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
+    app.run(host='127.0.0.1', port=5000, debug=False, use_reloader=False)

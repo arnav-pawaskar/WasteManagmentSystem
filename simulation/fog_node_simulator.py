@@ -3,53 +3,119 @@ import time
 from typing import List, Dict, Optional, Callable
 from datetime import datetime
 from contracts.message_types import BinTelemetry, ZoneState, RoutePlan
+from contracts.ledger import EventType, PermissionedLedger, ValidatorRegistry
 from modules.route_optimizer import RouteManager
 from modules.inter_fog_comm import InterFogCommunicator
 from modules.election_module import InvitationElection, LeaderManager, NodeState
 
 class FogNode:
     """Simulates a single fog node with all three modules"""
-    
-    def __init__(self, zone_id: int, truck_count: int = 1, 
+
+    def __init__(self, zone_id: int, truck_count: int = 1,
                  overload_threshold: int = 10,
-                 bin_simulator = None):
+                 bin_simulator = None,
+                 ledger: PermissionedLedger = None):
         self.zone_id = zone_id
         self.truck_count = truck_count
         self.overload_threshold = overload_threshold
         self.bin_simulator = bin_simulator
-        
+        self.ledger = ledger
+
         # Initialize modules
         self.route_manager = RouteManager(zone_id, truck_count)
         self.communicator = InterFogCommunicator(zone_id, overload_threshold)
         self.election: InvitationElection = None  # Set by FogNodeSimulator
-        
+
         # Node state
         self.is_leader = False
         self.is_running = False
         self.zone_bins: List[BinTelemetry] = []
-        
+        self._bins_lock = threading.RLock()
+
         # Statistics tracking
         self.routes_completed = 0
         self.bins_serviced = 0
         self.spillovers_handled = 0
-        
+        self.bins_adopted = 0
+        self._last_snapshot_load = None
+
         # Setup callbacks
         self._setup_callbacks()
-    
+
+    def _commit(self, event_type: EventType, payload: dict):
+        """Commit an operational event to the permissioned ledger (Section IV-D)"""
+        if self.ledger is None:
+            return
+        try:
+            self.ledger.submit(event_type, self.zone_id, payload, str(self.zone_id))
+        except Exception as e:
+            print(f"Zone {self.zone_id}: Ledger commit failed for {event_type.value}: {e}")
+
     def _setup_callbacks(self):
         """Setup callbacks between modules"""
         # Route manager callbacks
         self.route_manager.overflow_callbacks = []
-        
+
         # Communication callbacks
         self.communicator.spillover_manager.add_spillover_completed_callback(
             self._handle_spillover_completed
         )
-    
+        self.communicator.spillover_manager.add_spillover_adopted_callback(
+            self._handle_spillover_adopted
+        )
+
     def _handle_spillover_completed(self, target_zone: int, bin_ids: List[str]):
-        """Handle completed spillover"""
+        """
+        Sender side: release ownership of bins that a peer has accepted.
+
+        Until this actually removed the bins, spillover incremented a counter while
+        the sending zone kept every bin it claimed to have transferred.
+        """
+        transferred = set(bin_ids)
+        with self._bins_lock:
+            self.zone_bins = [b for b in self.zone_bins if b.bin_id not in transferred]
+            self.route_manager.release_bins(transferred)
+
         self.spillovers_handled += len(bin_ids)
         print(f"Zone {self.zone_id}: Spillover completed - {len(bin_ids)} bins transferred to Zone {target_zone}")
+
+        self._commit(EventType.SPILLOVER_TRANSFER, {
+            "direction": "out",
+            "peer_zone": target_zone,
+            "bin_ids": sorted(transferred),
+            "bin_count": len(bin_ids),
+        })
+        self.update_zone_state()
+
+    def _handle_spillover_adopted(self, sender_zone: int, bins: List[BinTelemetry]):
+        """Receiver side: take ownership of bins transferred from a peer."""
+        if not bins:
+            return
+
+        with self._bins_lock:
+            existing = {b.bin_id for b in self.zone_bins}
+            adopted = []
+            for b in bins:
+                if b.bin_id in existing:
+                    continue
+                b.zone_id = self.zone_id          # responsibility now sits here
+                self.zone_bins.append(b)
+                adopted.append(b)
+
+        if not adopted:
+            return
+
+        self.bins_adopted += len(adopted)
+        print(f"Zone {self.zone_id}: Adopted {len(adopted)} bins from Zone {sender_zone}")
+
+        self._commit(EventType.SPILLOVER_TRANSFER, {
+            "direction": "in",
+            "peer_zone": sender_zone,
+            "bin_ids": sorted(b.bin_id for b in adopted),
+            "bin_count": len(adopted),
+        })
+        self.route_manager.update_overflowing_bins(list(self.zone_bins))
+        self.update_zone_state()
     
     def initialize_bins(self, bins: List[BinTelemetry]):
         """Initialize bins for this zone"""
@@ -99,14 +165,28 @@ class FogNode:
         time.sleep(min(execution_time, 10))  # Cap at 10 seconds for demo
         
         # Complete the route and actually empty bins in the simulator
-        for bin_id in route.route_bins:
+        serviced = list(route.route_bins)
+        for bin_id in serviced:
             if self.bin_simulator:
                 self.bin_simulator.empty_bin(bin_id)
+            # Each bin service confirmation is an independently auditable event.
+            self._commit(EventType.BIN_SERVICED, {
+                "bin_id": bin_id,
+                "truck_id": truck_id,
+            })
+
         self.route_manager.empty_bins_in_route(truck_id)
         self.routes_completed += 1
-        self.bins_serviced += len(route.route_bins)
-        
-        print(f"Zone {self.zone_id}: Route completed for {truck_id} - {len(route.route_bins)} bins serviced")
+        self.bins_serviced += len(serviced)
+
+        self._commit(EventType.ROUTE_COMPLETED, {
+            "truck_id": truck_id,
+            "bin_ids": serviced,
+            "bin_count": len(serviced),
+            "route_distance": round(route.route_distance, 4),
+        })
+
+        print(f"Zone {self.zone_id}: Route completed for {truck_id} - {len(serviced)} bins serviced")
         
         # Update state
         overflowing_bins = self.route_manager.overflowing_bins
@@ -119,11 +199,23 @@ class FogNode:
     def update_zone_state(self):
         """Update and broadcast zone state"""
         overflowing_bins = self.route_manager.overflowing_bins
+        load = len(overflowing_bins)
+
         self.communicator.update_state(
-            len(overflowing_bins),
+            load,
             self.truck_count,
             overflowing_bins
         )
+
+        # Commit a snapshot only when the zone's load actually changes; committing
+        # on every 5 s tick would fill the ledger with identical records.
+        if load != self._last_snapshot_load:
+            self._last_snapshot_load = load
+            self._commit(EventType.ZONE_SNAPSHOT, {
+                "active_bins": load,
+                "truck_count": self.truck_count,
+                "total_bins": len(self.zone_bins),
+            })
     
     def set_leader(self, is_leader: bool):
         """Set leader status from election module"""
@@ -152,7 +244,8 @@ class FogNode:
             "statistics": {
                 "routes_completed": self.routes_completed,
                 "bins_serviced": self.bins_serviced,
-                "spillovers_handled": self.spillovers_handled
+                "spillovers_handled": self.spillovers_handled,
+                "bins_adopted": self.bins_adopted
             }
         }
     
@@ -210,21 +303,35 @@ class FogNodeSimulator:
         self.fog_nodes: Dict[int, FogNode] = {}
         self.running = False
         self.leader_manager = LeaderManager()
-        
+
+        # Permissioned ledger shared by the zone validators (Section IV-D). Every
+        # fog node is a validator; keys are issued at network formation.
+        self.validator_registry = ValidatorRegistry()
+        for zone_id in range(1, num_zones + 1):
+            self.validator_registry.register(str(zone_id))
+        self.ledger = PermissionedLedger(self.validator_registry)
+
         # Create fog nodes
         for zone_id in range(1, num_zones + 1):
-            self.fog_nodes[zone_id] = FogNode(zone_id, trucks_per_zone, bin_simulator=bin_simulator)
-        
+            self.fog_nodes[zone_id] = FogNode(zone_id, trucks_per_zone,
+                                              bin_simulator=bin_simulator,
+                                              ledger=self.ledger)
+
         # Setup inter-node communication
         self._setup_inter_node_communication()
-        
+
         # Setup election module
         self._setup_election()
-    
+
     def _setup_inter_node_communication(self):
         """Setup communication between fog nodes"""
-        # Connect message routers between nodes
+        all_zones = list(self.fog_nodes.keys())
+
         for zone_id, node in self.fog_nodes.items():
+            # Static roster: lets a timed-out peer be re-beaconed and rediscovered
+            # instead of the node partitioning itself permanently.
+            node.communicator.peer_discovery.register_roster(all_zones)
+
             for other_zone_id, other_node in self.fog_nodes.items():
                 if zone_id != other_zone_id:
                     # Register peer discovery
@@ -270,12 +377,17 @@ class FogNodeSimulator:
     def _setup_election(self):
         """Setup the election module for all nodes"""
         all_node_ids = [str(zid) for zid in self.fog_nodes.keys()]
-        
+
         for zone_id, node in self.fog_nodes.items():
             node_id = str(zone_id)
-            node.election = InvitationElection(node_id, all_node_ids)
             self.leader_manager.register_node(node_id, all_node_ids)
-            
+
+            # Bind the node to the SAME election instance the LeaderManager drives.
+            # Previously each node held a second, private InvitationElection whose
+            # outbox was never drained, so it stayed IDLE forever -- and that was
+            # the object get_election_status() (and therefore the web UI) reported.
+            node.election = self.leader_manager.election_nodes[node_id]
+
             # Wire election leader callback to node
             node.election.add_leader_elected_callback(
                 lambda leader_id, n=node: n.set_leader(leader_id == str(n.zone_id))
@@ -322,11 +434,22 @@ class FogNodeSimulator:
         """Stop the fog node simulation"""
         self.running = False
         self.leader_manager.stop_heartbeat_service()
-        
+
         # Stop all fog nodes
         for zone_id, node in self.fog_nodes.items():
             node.stop_node()
-        
+
+        # Seal any uncommitted events so the audit trail is complete at shutdown.
+        if self.ledger is not None:
+            self.ledger.flush(str(min(self.fog_nodes) if self.fog_nodes else 1))
+            ok, problems = self.ledger.verify_chain()
+            stats = self.ledger.get_statistics()
+            print(f"Ledger: {stats['blocks']} blocks, "
+                  f"{stats['committed_transactions']} committed events, "
+                  f"chain valid: {ok}")
+            if not ok:
+                print(f"Ledger integrity problems: {problems[:3]}")
+
         print("Fog node simulation stopped")
     
     def get_system_status(self) -> Dict:
@@ -354,7 +477,10 @@ class FogNodeSimulator:
             system_status["system_totals"]["total_routes_completed"] += node_status["statistics"]["routes_completed"]
             system_status["system_totals"]["total_bins_serviced"] += node_status["statistics"]["bins_serviced"]
             system_status["system_totals"]["total_spillovers"] += node_status["statistics"]["spillovers_handled"]
-        
+
+        if self.ledger is not None:
+            system_status["ledger"] = self.ledger.get_statistics()
+
         return system_status
     
     def print_system_status(self):

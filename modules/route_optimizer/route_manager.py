@@ -95,6 +95,29 @@ class RouteManager:
             
             print(f"Zone {self.zone_id}: Route completed for {truck_id}")
     
+    def release_bins(self, bin_ids):
+        """
+        Drop bins this zone no longer owns (e.g. handed to a peer via spillover).
+
+        Any active route referencing a released bin is pruned so trucks are not
+        dispatched to bins another zone is now servicing.
+        """
+        released = set(bin_ids)
+        if not released:
+            return
+
+        self.overflowing_bins = [b for b in self.overflowing_bins
+                                 if b.bin_id not in released]
+
+        for truck_id, route in list(self.active_routes.items()):
+            if not released.intersection(route.route_bins):
+                continue
+            remaining = [b for b in route.route_bins if b not in released]
+            if remaining:
+                route.route_bins = remaining
+            else:
+                del self.active_routes[truck_id]
+
     def get_zone_status(self) -> Dict:
         """Get current zone routing status"""
         priority_dist = self.priority_manager.get_priority_distribution(

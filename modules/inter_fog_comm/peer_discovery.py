@@ -12,6 +12,13 @@ class PeerDiscovery:
         self.broadcast_interval = broadcast_interval
         self.peer_registry: Dict[int, ZoneState] = {}
         self.running = False
+
+        # Statically configured zone roster. In a permissioned deployment a fog node
+        # knows which zones exist from configuration, so a peer that times out can
+        # still be beaconed at and rediscovered. Without this, a peer dropped by
+        # check_peer_health can never come back: broadcasts only go to live peers,
+        # so silence becomes a permanent partition.
+        self.roster: Set[int] = set()
         
         # Callbacks for peer events
         self.peer_discovered_callbacks: List[Callable[[ZoneState], None]] = []
@@ -45,16 +52,33 @@ class PeerDiscovery:
             except Exception as e:
                 print(f"Error in peer lost callback: {e}")
     
+    def register_roster(self, zone_ids):
+        """Record the statically configured set of zones in this deployment"""
+        self.roster = {int(z) for z in zone_ids if int(z) != self.zone_id}
+
+    def presence_targets(self) -> List[int]:
+        """
+        Zones to send presence/state to: live peers plus the configured roster.
+
+        Including the roster is what lets a timed-out peer be rediscovered.
+        """
+        return sorted(self.roster | set(self.peer_registry.keys()))
+
     def register_peer(self, peer_state: ZoneState):
-        """Register a new peer or update existing peer"""
+        """Register a new peer, or refresh an existing peer's liveness"""
         if peer_state.zone_id == self.zone_id:
             return  # Don't register self
-        
+
+        is_new = peer_state.zone_id not in self.peer_registry
+
         self.peer_registry[peer_state.zone_id] = peer_state
         self.peer_heartbeats[peer_state.zone_id] = datetime.now()
-        
-        print(f"Zone {self.zone_id}: Discovered peer Zone {peer_state.zone_id}")
-        self._notify_peer_discovered(peer_state)
+
+        # Only announce on first sight; gossip refreshes this constantly and would
+        # otherwise flood the log with rediscovery messages.
+        if is_new:
+            print(f"Zone {self.zone_id}: Discovered peer Zone {peer_state.zone_id}")
+            self._notify_peer_discovered(peer_state)
     
     def create_zone_state(self, active_bins: int, truck_count: int) -> ZoneState:
         """Create current zone state for broadcasting"""
@@ -93,7 +117,9 @@ class PeerDiscovery:
         inactive_peers = []
         
         for zone_id, last_heartbeat in self.peer_heartbeats.items():
-            if (current_time - last_heartbeat).seconds > self.heartbeat_timeout:
+            # total_seconds(), not .seconds: the latter discards the day component
+            # and is wrong for negative deltas (clock skew).
+            if (current_time - last_heartbeat).total_seconds() > self.heartbeat_timeout:
                 inactive_peers.append(zone_id)
         
         for zone_id in inactive_peers:
