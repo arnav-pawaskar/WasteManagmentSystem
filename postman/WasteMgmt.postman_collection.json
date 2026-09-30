@@ -1,0 +1,718 @@
+{
+  "info": {
+    "_postman_id": "fb5f0dfa-5f97-4ad4-9f8c-328a71879afe",
+    "name": "Fog Waste Management API",
+    "description": "Tests for the FastAPI service in web/app.py. Select the 'Fog Waste Management' environment, set admin_key, then run the whole collection in order with the Collection Runner.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. Public",
+      "item": [
+        {
+          "name": "Health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Responds in < 1000 ms\", () => pm.expect(pm.response.responseTime).to.be.below(1000));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"status is ok\", () => pm.expect(body.status).to.eql(\"ok\"));",
+                  "pm.test(\"running is boolean\", () => pm.expect(body.running).to.be.a(\"boolean\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Liveness check. Public."
+          }
+        },
+        {
+          "name": "System Status",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Responds in < 1000 ms\", () => pm.expect(pm.response.responseTime).to.be.below(1000));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"has configuration, fog_nodes, election_status\", () => {",
+                  "    pm.expect(body).to.have.property(\"configuration\");",
+                  "    pm.expect(body).to.have.property(\"fog_nodes\");",
+                  "    pm.expect(body).to.have.property(\"election_status\");",
+                  "});",
+                  "pm.test(\"a leader is elected\", () => pm.expect(body.election_status.current_leader).to.not.be.null);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/system/status",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "system",
+                "status"
+              ]
+            },
+            "description": "Full system status: config, bin statistics, fog nodes, ledger, election. Public."
+          }
+        },
+        {
+          "name": "Bins",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Responds in < 1000 ms\", () => pm.expect(pm.response.responseTime).to.be.below(1000));",
+                  "const bins = pm.response.json();",
+                  "pm.test(\"returns a non-empty array\", () => pm.expect(bins).to.be.an(\"array\").that.is.not.empty);",
+                  "pm.test(\"bins have id, zone, position, fill level\", () => {",
+                  "    pm.expect(bins[0]).to.include.all.keys(\"bin_id\", \"zone_id\", \"x\", \"y\", \"fill_level\", \"is_overflowing\");",
+                  "});",
+                  "pm.test(\"fill levels are 0-100\", () => bins.forEach(b => pm.expect(b.fill_level).to.be.within(0, 100)));",
+                  "pm.collectionVariables.set(\"first_bin_id\", bins[0].bin_id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/bins",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "bins"
+              ]
+            },
+            "description": "All bins with position and fill level. Saves the first bin id for 'Empty Bin'. Public."
+          }
+        },
+        {
+          "name": "Routes",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Responds in < 1000 ms\", () => pm.expect(pm.response.responseTime).to.be.below(1000));",
+                  "pm.test(\"returns an array\", () => pm.expect(pm.response.json()).to.be.an(\"array\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/routes",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "routes"
+              ]
+            },
+            "description": "Active truck routes (may be empty until bins overflow). Public."
+          }
+        },
+        {
+          "name": "Network Topology",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Responds in < 1000 ms\", () => pm.expect(pm.response.responseTime).to.be.below(1000));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"has nodes and edges\", () => pm.expect(body).to.have.all.keys(\"nodes\", \"edges\"));",
+                  "pm.test(\"exactly one leader\", () => pm.expect(body.nodes.filter(n => n.is_leader).length).to.eql(1));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/network",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "network"
+              ]
+            },
+            "description": "Fog nodes, their election state, and peer links. Public."
+          }
+        },
+        {
+          "name": "Events",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Responds in < 1000 ms\", () => pm.expect(pm.response.responseTime).to.be.below(1000));",
+                  "pm.test(\"at most 20 events\", () => pm.expect(pm.response.json().length).to.be.at.most(20));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/events?limit=20",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "events"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20"
+                }
+              ]
+            },
+            "description": "Recent event log. Public."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Auth and validation",
+      "item": [
+        {
+          "name": "Stop without key -> 401",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 401\", () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/system/stop",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "system",
+                "stop"
+              ]
+            },
+            "description": "Control endpoints must reject callers without X-API-Key."
+          }
+        },
+        {
+          "name": "Election with wrong key -> 401",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 401\", () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-API-Key",
+                "value": "definitely-wrong-key"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/election/trigger",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "election",
+                "trigger"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"initiator_zone\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Config out of range -> 422",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 422\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"error names the zones field\", () => pm.expect(JSON.stringify(pm.response.json())).to.include(\"zones\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-API-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/system/config",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "system",
+                "config"
+              ]
+            },
+            "description": "Bounds keep a caller from sizing the simulation beyond what the VM can hold.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"zones\": 1000,\n  \"bins_per_zone\": 15,\n  \"trucks_per_zone\": 1,\n  \"update_interval\": 3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Election unknown zone -> 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 400\", () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-API-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/election/trigger",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "election",
+                "trigger"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"initiator_zone\": 99\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Empty unknown bin -> 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 404\", () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/bin/no_such_bin/empty",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "bin",
+                "no_such_bin",
+                "empty"
+              ]
+            },
+            "description": ""
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Admin",
+      "item": [
+        {
+          "name": "Configure and Restart",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"status is configured_and_started\", () => pm.expect(body.status).to.eql(\"configured_and_started\"));",
+                  "pm.test(\"config echoed back\", () => pm.expect(body.config.zones).to.eql(3));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-API-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/system/config",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "system",
+                "config"
+              ]
+            },
+            "description": "Restarts the shared simulation with a new configuration. Admin.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"zones\": 3,\n  \"bins_per_zone\": 15,\n  \"trucks_per_zone\": 1,\n  \"update_interval\": 3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Trigger Election",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"election initiated\", () => pm.expect(pm.response.json().status).to.eql(\"election_initiated\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-API-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/election/trigger",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "election",
+                "trigger"
+              ]
+            },
+            "description": "Runs the Invitation election from the given zone (~2 s). Admin.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"initiator_zone\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Empty Bin",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"bin emptied\", () => pm.expect(pm.response.json().status).to.eql(\"bin_emptied\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/bin/{{first_bin_id}}/empty",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "bin",
+                "{{first_bin_id}}",
+                "empty"
+              ]
+            },
+            "description": "Resets one bin to 0%. Uses the id saved by 'Bins'. Admin."
+          }
+        },
+        {
+          "name": "Stop System",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Responds in < 1000 ms\", () => pm.expect(pm.response.responseTime).to.be.below(1000));",
+                  "pm.test(\"stopped\", () => pm.expect(pm.response.json().status).to.eql(\"stopped\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/system/stop",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "system",
+                "stop"
+              ]
+            },
+            "description": "Admin."
+          }
+        },
+        {
+          "name": "Health after stop",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"not running\", () => pm.expect(pm.response.json().running).to.eql(false));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Start System",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"started\", () => pm.expect(pm.response.json().status).to.eql(\"started\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{admin_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/system/start",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "system",
+                "start"
+              ]
+            },
+            "description": "Admin. Leaves the simulation running at the end of the run."
+          }
+        },
+        {
+          "name": "Health after start",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"running\", () => pm.expect(pm.response.json().running).to.eql(true));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": ""
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "first_bin_id",
+      "value": "bin_1_1"
+    }
+  ]
+}

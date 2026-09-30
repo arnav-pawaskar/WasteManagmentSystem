@@ -1,0 +1,27 @@
+[Unit]
+Description=Fog-Based Smart Waste Management System (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wms
+Group=wms
+WorkingDirectory=/opt/wms
+EnvironmentFile=/etc/wms.env
+Environment=PYTHONUNBUFFERED=1
+# Single worker only: the simulation lives in a module-global in web/app.py,
+# so every extra worker would run its own separate simulation.
+# Bound to localhost; nginx on port 80 is the only public entry point.
+ExecStart=/opt/wms/.venv/bin/uvicorn web.app:app --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

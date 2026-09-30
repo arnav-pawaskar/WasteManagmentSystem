@@ -134,7 +134,7 @@ with a platform such as Hyperledger Fabric.
 ### Prerequisites
 - Python 3.7+
 - Core system and ledger: standard library only (`hashlib`, `hmac`, `threading`)
-- Web UI: `pip install -r web/requirements.txt`
+- Web UI / API (FastAPI): `pip install -r web/requirements.txt`
 - Notebook: `pip install -r requirements-notebook.txt`
 
 ### Installation
@@ -170,6 +170,24 @@ python main.py --zones 5 --bins-per-zone 20 --trucks-per-zone 2 --update-interva
 python demo.py --scenario high-load
 ```
 
+#### Web Dashboard and API (FastAPI)
+```bash
+pip install -r web/requirements.txt
+ADMIN_API_KEY=choose-a-key python web/launch.py
+```
+Open http://localhost:8000 for the dashboard and http://localhost:8000/docs for the
+Swagger API docs. A default simulation starts automatically (`AUTOSTART=true`). Read
+endpoints are public; Start/Stop/Election/Empty-bin need the `X-API-Key` header, and the
+page prompts for the key once. See `.env.example` for all settings.
+
+A Postman collection covering every endpoint is in `postman/`.
+
+### Deployment (Google Cloud)
+
+The dashboard and simulation deploy to a single Always Free GCP e2-micro VM behind nginx.
+Step-by-step instructions, cost notes and an evidence checklist are in
+[`deploy/README.md`](deploy/README.md).
+
 ### Running Tests
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
@@ -180,7 +198,9 @@ Or individually:
 python tests/test_route_optimization.py   # routing, priority tiers, route manager
 python tests/test_inter_fog_comm.py       # peer discovery, gossip, spillover
 python tests/test_ledger.py               # ledger commit, audit, tamper detection
+python tests/test_web_api.py              # FastAPI endpoints, admin auth, validation
 ```
+`test_web_api.py` is skipped automatically if the web dependencies are not installed.
 
 ## Project Structure
 
@@ -218,7 +238,16 @@ fog-waste-system/
 |-- tests/
 |   |-- test_route_optimization.py
 |   |-- test_inter_fog_comm.py
-|   +-- test_ledger.py
+|   |-- test_ledger.py
+|   +-- test_web_api.py
+|
+|-- web/
+|   |-- app.py                 # FastAPI app: REST API + dashboard
+|   |-- launch.py              # Local launcher (uvicorn)
+|   |-- static/, templates/    # Dashboard frontend
+|
+|-- postman/                   # Postman collection + environment
+|-- deploy/                    # GCP VM setup: systemd unit, nginx config, setup.sh
 |
 |-- main.py                     # System entry point
 |-- demo.py                     # Demo scenarios

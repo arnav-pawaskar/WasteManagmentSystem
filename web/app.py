@@ -1,27 +1,39 @@
 #!/usr/bin/env python3
 """
-Flask backend for Fog-Based Smart Waste Management System Web UI
-Provides REST API endpoints for real-time monitoring and control
+FastAPI backend for Fog-Based Smart Waste Management System Web UI
+Provides REST API endpoints for real-time monitoring and control.
+
+Read-only endpoints are public. Control endpoints (start/stop/config/election/
+empty bin) require the X-API-Key header to match the ADMIN_API_KEY env var.
+
+Must run with a single worker: the simulation lives in the module-global
+`system_instance`, so every extra worker would run its own separate simulation.
 """
 
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flask import Flask, jsonify, render_template, request
-from flask_cors import CORS
+import secrets
 import threading
-import time
-import json
+from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
 from simulation.bin_simulator import BinSimulator
 from simulation.fog_node_simulator import FogNodeSimulator
 
-app = Flask(__name__, template_folder='templates', static_folder='static')
-CORS(app)
+WEB_DIR = Path(__file__).resolve().parent
 
-# Global system instance
+# Global system instance, swapped under _system_lock
 system_instance = None
+_system_lock = threading.Lock()
 
 class SmartWasteSystem:
     """Wrapper class for the complete system with web API"""
@@ -67,7 +79,8 @@ class SmartWasteSystem:
     def _log_event(self, event_type, message, data=None):
         """Add event to log"""
         event = {
-            "timestamp": datetime.now().isoformat(),
+            # Offset-aware so browsers in another timezone than the server render it correctly
+            "timestamp": datetime.now().astimezone().isoformat(),
             "type": event_type,
             "message": message,
             "data": data or {}
@@ -202,111 +215,154 @@ class SmartWasteSystem:
         self._log_event("ACTION", f"Manually emptied bin {bin_id}")
         return {"status": "bin_emptied"}
 
-# Flask API Endpoints
+# ---------------------------------------------------------------------------
+# API models and auth
+# ---------------------------------------------------------------------------
 
-@app.route('/')
+class SystemConfig(BaseModel):
+    """Simulation configuration. Bounds mirror the inputs in index.html and keep
+    a public caller from sizing the simulation beyond what a 1 GB VM can hold."""
+    zones: int = Field(3, ge=1, le=10)
+    bins_per_zone: int = Field(15, ge=5, le=50)
+    trucks_per_zone: int = Field(1, ge=1, le=5)
+    update_interval: int = Field(3, ge=1, le=10)
+
+
+class ElectionRequest(BaseModel):
+    initiator_zone: Optional[int] = None
+
+
+def require_admin(x_api_key: Optional[str] = Header(None)):
+    """Guard control endpoints. Fails closed when no admin key is configured."""
+    expected = os.environ.get("ADMIN_API_KEY", "")
+    if not expected:
+        raise HTTPException(status_code=503, detail="Admin key not configured on server")
+    if not x_api_key or not secrets.compare_digest(x_api_key, expected):
+        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
+
+
+def _require_system() -> SmartWasteSystem:
+    if not system_instance:
+        raise HTTPException(status_code=503, detail="System not initialized")
+    return system_instance
+
+
+def _autostart_enabled() -> bool:
+    return os.environ.get("AUTOSTART", "true").strip().lower() in ("1", "true", "yes")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start a default simulation so the public dashboard is live on first visit."""
+    global system_instance
+    if _autostart_enabled():
+        with _system_lock:
+            if not system_instance:
+                system_instance = SmartWasteSystem()
+            system_instance.start()
+    yield
+    with _system_lock:
+        if system_instance:
+            system_instance.stop()
+
+
+app = FastAPI(
+    title="Fog-Based Smart Waste Management System",
+    description="Monitoring and control API for the fog-node waste collection simulation.",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+app.mount("/static", StaticFiles(directory=WEB_DIR / "static"), name="static")
+
+# ---------------------------------------------------------------------------
+# Endpoints. Declared as plain `def` so they run in the threadpool: election
+# blocks for ~2 s and must not stall the event loop.
+# ---------------------------------------------------------------------------
+
+@app.get("/", include_in_schema=False)
 def index():
     """Serve the main UI page"""
-    return render_template('index.html')
+    return FileResponse(WEB_DIR / "templates" / "index.html")
 
-@app.route('/api/system/status', methods=['GET'])
+@app.get("/health", tags=["public"])
+def health():
+    """Liveness check"""
+    return {"status": "ok", "running": bool(system_instance and system_instance.running)}
+
+@app.get("/api/system/status", tags=["public"])
 def api_system_status():
     """Get system status"""
-    if not system_instance:
-        return jsonify({"error": "System not initialized"}), 500
-    return jsonify(system_instance.get_status())
+    return _require_system().get_status()
 
-@app.route('/api/system/start', methods=['POST'])
+@app.post("/api/system/start", tags=["admin"], dependencies=[Depends(require_admin)])
 def api_system_start():
     """Start the system"""
     global system_instance
-    if not system_instance:
-        system_instance = SmartWasteSystem()
-    system_instance.start()
-    return jsonify({"status": "started"})
+    with _system_lock:
+        if not system_instance:
+            system_instance = SmartWasteSystem()
+        system_instance.start()
+    return {"status": "started"}
 
-@app.route('/api/system/stop', methods=['POST'])
+@app.post("/api/system/stop", tags=["admin"], dependencies=[Depends(require_admin)])
 def api_system_stop():
     """Stop the system"""
-    if system_instance:
-        system_instance.stop()
-    return jsonify({"status": "stopped"})
+    with _system_lock:
+        if system_instance:
+            system_instance.stop()
+    return {"status": "stopped"}
 
-@app.route('/api/system/config', methods=['POST'])
-def api_system_config():
-    """Configure and initialize the system"""
+@app.post("/api/system/config", tags=["admin"], dependencies=[Depends(require_admin)])
+def api_system_config(config: Optional[SystemConfig] = None):
+    """Configure and (re)start the system"""
     global system_instance
-    data = request.get_json() or {}
-    
-    zones = data.get('zones', 3)
-    bins_per_zone = data.get('bins_per_zone', 15)
-    trucks_per_zone = data.get('trucks_per_zone', 1)
-    update_interval = data.get('update_interval', 3)
-    
-    if system_instance:
-        system_instance.stop()
-    
-    system_instance = SmartWasteSystem(zones, bins_per_zone, trucks_per_zone, update_interval)
-    system_instance.start()
-    
-    return jsonify({
-        "status": "configured_and_started",
-        "config": {
-            "zones": zones,
-            "bins_per_zone": bins_per_zone,
-            "trucks_per_zone": trucks_per_zone,
-            "update_interval": update_interval
-        }
-    })
+    config = config or SystemConfig()
 
-@app.route('/api/bins', methods=['GET'])
+    with _system_lock:
+        if system_instance:
+            system_instance.stop()
+        system_instance = SmartWasteSystem(config.zones, config.bins_per_zone,
+                                           config.trucks_per_zone, config.update_interval)
+        system_instance.start()
+
+    return {"status": "configured_and_started", "config": config.model_dump()}
+
+@app.get("/api/bins", tags=["public"])
 def api_bins():
     """Get all bin data"""
-    if not system_instance:
-        return jsonify({"error": "System not initialized"}), 500
-    return jsonify(system_instance.get_bins_data())
+    return _require_system().get_bins_data()
 
-@app.route('/api/routes', methods=['GET'])
+@app.get("/api/routes", tags=["public"])
 def api_routes():
     """Get all active routes"""
-    if not system_instance:
-        return jsonify({"error": "System not initialized"}), 500
-    return jsonify(system_instance.get_routes_data())
+    return _require_system().get_routes_data()
 
-@app.route('/api/network', methods=['GET'])
+@app.get("/api/network", tags=["public"])
 def api_network():
     """Get network topology"""
-    if not system_instance:
-        return jsonify({"error": "System not initialized"}), 500
-    return jsonify(system_instance.get_network_topology())
+    return _require_system().get_network_topology()
 
-@app.route('/api/events', methods=['GET'])
-def api_events():
+@app.get("/api/events", tags=["public"])
+def api_events(limit: int = Query(50, ge=1, le=100)):
     """Get recent events"""
     if not system_instance:
-        return jsonify([])
-    limit = request.args.get('limit', 50, type=int)
-    return jsonify(system_instance.get_events(limit))
+        return []
+    return system_instance.get_events(limit)
 
-@app.route('/api/election/trigger', methods=['POST'])
-def api_trigger_election():
+@app.post("/api/election/trigger", tags=["admin"], dependencies=[Depends(require_admin)])
+def api_trigger_election(request: Optional[ElectionRequest] = None):
     """Manually trigger leader election"""
-    if not system_instance:
-        return jsonify({"error": "System not initialized"}), 500
-    data = request.get_json() or {}
-    initiator = data.get('initiator_zone')
-    return jsonify(system_instance.trigger_election(initiator))
+    system = _require_system()
+    initiator = request.initiator_zone if request else None
+    if initiator is not None and not 1 <= initiator <= system.zones:
+        raise HTTPException(status_code=400,
+                            detail=f"initiator_zone must be between 1 and {system.zones}")
+    return system.trigger_election(initiator)
 
-@app.route('/api/bin/<bin_id>/empty', methods=['POST'])
-def api_empty_bin(bin_id):
+@app.post("/api/bin/{bin_id}/empty", tags=["admin"], dependencies=[Depends(require_admin)])
+def api_empty_bin(bin_id: str):
     """Manually empty a specific bin"""
-    if not system_instance:
-        return jsonify({"error": "System not initialized"}), 500
-    return jsonify(system_instance.empty_bin(bin_id))
-
-if __name__ == '__main__':
-    # Initialize system with defaults
-    system_instance = SmartWasteSystem()
-    
-    # Start the Flask server
-    app.run(host='127.0.0.1', port=5000, debug=False, use_reloader=False)
+    system = _require_system()
+    if bin_id not in system.bin_simulator.bins:
+        raise HTTPException(status_code=404, detail=f"Unknown bin {bin_id}")
+    return system.empty_bin(bin_id)

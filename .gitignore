@@ -25,3 +25,12 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Secrets
+.env
+
+# AI assistant / agent tooling (local only)
+.agents/
+.claude/
+CLAUDE.local.md
+skills-lock.json

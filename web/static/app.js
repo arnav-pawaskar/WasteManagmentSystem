@@ -1,157 +1,311 @@
-// Smart Waste Management System - Web UI Controller with HiDPI Support
+// Fog Waste Console — dashboard controller (vanilla JS, no dependencies)
 
 const API_BASE = '';
+const POLL_MS = 2000;
 let updateInterval = null;
 let isRunning = false;
 
-// DOM Elements
-const startBtn = document.getElementById('start-btn');
-const stopBtn = document.getElementById('stop-btn');
-const triggerElectionBtn = document.getElementById('trigger-election-btn');
-const systemStatus = document.getElementById('system-status');
-const totalBinsEl = document.getElementById('total-bins');
-const overflowingBinsEl = document.getElementById('overflowing-bins');
-const routesCompletedEl = document.getElementById('routes-completed');
-const currentLeaderEl = document.getElementById('current-leader');
-const eventLogEl = document.getElementById('event-log');
+// ---------------------------------------------------------------------------
+// DOM
+// ---------------------------------------------------------------------------
 
-// Canvas elements
-const binsCanvas = document.getElementById('bins-canvas');
-const routesCanvas = document.getElementById('routes-canvas');
-const networkCanvas = document.getElementById('network-canvas');
+const $ = (id) => document.getElementById(id);
 
-// Canvas contexts with willReadFrequently for better performance
-const binsCtx = binsCanvas.getContext('2d', { willReadFrequently: true });
-const routesCtx = routesCanvas.getContext('2d', { willReadFrequently: true });
-const networkCtx = networkCanvas.getContext('2d', { willReadFrequently: true });
+const startBtn = $('start-btn');
+const stopBtn = $('stop-btn');
+const triggerElectionBtn = $('trigger-election-btn');
+const statusPill = $('system-status');
+const lastUpdatedEl = $('last-updated');
+const eventLogEl = $('event-log');
 
-// Data storage
+const binsCanvas = $('bins-canvas');
+const routesCanvas = $('routes-canvas');
+const networkCanvas = $('network-canvas');
+const binsCtx = binsCanvas.getContext('2d');
+const routesCtx = routesCanvas.getContext('2d');
+const networkCtx = networkCanvas.getContext('2d');
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
 let binsData = [];
 let routesData = [];
 let networkData = { nodes: [], edges: [] };
-let eventsData = [];
+let serverEvents = [];
+let localEvents = [];          // UI-only messages, kept separately so polling doesn't erase them
+let seenEventKeys = new Set();
+let lastStatus = null;
 
-// Setup HiDPI canvas
+// Hit-test targets for tooltips, rebuilt on every draw
+let binHits = [];
+let routeHits = [];
+
+const ROUTE_COLORS = ['#2563eb', '#7c3aed', '#db2777', '#0891b2', '#4f46e5', '#65a30d', '#c026d3', '#0d9488'];
+
+// ---------------------------------------------------------------------------
+// Theme
+// ---------------------------------------------------------------------------
+
+let palette = null;
+
+function readPalette() {
+    const css = getComputedStyle(document.documentElement);
+    const v = (name) => css.getPropertyValue(name).trim();
+    palette = {
+        surface: v('--surface'), surface2: v('--surface-2'), plot: v('--plot'),
+        border: v('--border'), borderStrong: v('--border-strong'),
+        text: v('--text'), muted: v('--muted'), faint: v('--faint'),
+        accent: v('--accent'), info: v('--info'), leader: v('--leader'),
+        low: v('--tier-low'), medium: v('--tier-medium'), high: v('--tier-high'), critical: v('--tier-critical'),
+        font: v('--font'),
+    };
+}
+
+function isDarkTheme() {
+    const explicit = document.documentElement.dataset.theme;
+    if (explicit) return explicit === 'dark';
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+function toggleTheme() {
+    const next = isDarkTheme() ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem('wms-theme', next); } catch (e) { /* storage blocked */ }
+    redrawAll();
+}
+
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', redrawAll);
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// Priority tiers from the paper (modules/route_optimizer/priority.py)
+function tierOf(fill) {
+    if (fill >= 90) return { key: 'critical', label: 'Critical' };
+    if (fill >= 80) return { key: 'high', label: 'High' };
+    if (fill >= 60) return { key: 'medium', label: 'Medium' };
+    return { key: 'low', label: 'Low' };
+}
+
+function tierColor(fill) {
+    return palette[tierOf(fill).key];
+}
+
+function withAlpha(color, alpha) {
+    // Works for #rrggbb; falls back to the colour itself
+    if (/^#[0-9a-f]{6}$/i.test(color)) {
+        const n = parseInt(color.slice(1), 16);
+        return `rgba(${n >> 16}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+    }
+    return color;
+}
+
+function font(size, weight = 500) {
+    return `${weight} ${size}px ${palette.font}`;
+}
+
+function formatTime(date) {
+    return date.toLocaleTimeString([], { hour12: false });
+}
+
 function setupCanvas(canvas, ctx) {
     const dpr = window.devicePixelRatio || 1;
     const rect = canvas.parentElement.getBoundingClientRect();
-    const cssWidth = Math.max(1, Math.floor(rect.width));
-    const cssHeight = Math.max(1, Math.floor(rect.height));
-
-    // Reset transform before resizing so scale does not compound over time.
+    const w = Math.max(1, Math.floor(rect.width));
+    const h = Math.max(1, Math.floor(rect.height));
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    
-    // Set actual size in memory (scaled to account for extra pixel density)
-    canvas.width = Math.round(cssWidth * dpr);
-    canvas.height = Math.round(cssHeight * dpr);
-    
-    // Normalize coordinate system to use css pixels
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
     ctx.scale(dpr, dpr);
-    
-    // Set display size (css pixels)
-    canvas.style.width = cssWidth + 'px';
-    canvas.style.height = cssHeight + 'px';
 }
 
-// Initialize canvases
+function clear(ctx, canvas) {
+    const w = canvas.parentElement.clientWidth;
+    const h = canvas.parentElement.clientHeight;
+    ctx.clearRect(0, 0, w, h);
+    return { w, h };
+}
+
+function emptyMessage(ctx, w, h, text) {
+    ctx.fillStyle = palette.faint;
+    ctx.font = font(13);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, w / 2, h / 2);
+}
+
+// Text with a background-coloured outline, so lines behind it don't cut through
+function haloText(ctx, text, x, y, fontSpec, color) {
+    ctx.font = fontSpec;
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = palette.plot;
+    ctx.strokeText(text, x, y);
+    ctx.fillStyle = color;
+    ctx.fillText(text, x, y);
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, r);
+}
+
 function initCanvases() {
     setupCanvas(binsCanvas, binsCtx);
     setupCanvas(routesCanvas, routesCtx);
     setupCanvas(networkCanvas, networkCtx);
 }
 
-// Event Listeners
-startBtn.addEventListener('click', startSystem);
-stopBtn.addEventListener('click', stopSystem);
-triggerElectionBtn.addEventListener('click', triggerElection);
-window.addEventListener('resize', () => {
-    initCanvases();
+function redrawAll() {
+    readPalette();
     drawBinsMap();
     drawRoutes();
     drawNetwork();
+}
+
+// ---------------------------------------------------------------------------
+// Admin key (control endpoints require X-API-Key)
+// ---------------------------------------------------------------------------
+
+const ADMIN_KEY_STORAGE = 'wms-admin-key';
+
+function getAdminKey() {
+    let key = null;
+    try { key = localStorage.getItem(ADMIN_KEY_STORAGE); } catch (e) { /* storage blocked */ }
+    if (!key) {
+        key = prompt('Admin API key (required to control the simulation):');
+        if (key) {
+            try { localStorage.setItem(ADMIN_KEY_STORAGE, key); } catch (e) { /* storage blocked */ }
+        }
+    }
+    return key;
+}
+
+function clearAdminKey() {
+    try { localStorage.removeItem(ADMIN_KEY_STORAGE); } catch (e) { /* storage blocked */ }
+}
+
+// fetch() for control endpoints. Returns the response, or null if no key was given.
+async function adminFetch(url, options = {}) {
+    const key = getAdminKey();
+    if (!key) {
+        addEvent('SYSTEM', 'Action cancelled: admin key required');
+        return null;
+    }
+    const headers = Object.assign({ 'Content-Type': 'application/json', 'X-API-Key': key }, options.headers || {});
+    const response = await fetch(url, Object.assign({}, options, { headers }));
+    if (response.status === 401) {
+        clearAdminKey();
+        addEvent('SYSTEM', 'Error: invalid admin key');
+    } else if (response.status === 503) {
+        addEvent('SYSTEM', 'Error: controls are disabled on this server');
+    }
+    return response;
+}
+
+// ---------------------------------------------------------------------------
+// Controls
+// ---------------------------------------------------------------------------
+
+startBtn.addEventListener('click', startSystem);
+stopBtn.addEventListener('click', stopSystem);
+triggerElectionBtn.addEventListener('click', triggerElection);
+$('theme-toggle').addEventListener('click', toggleTheme);
+
+// Re-measure canvases whenever their container changes size (window resize,
+// layout settling after load, breakpoint changes), at most once per frame.
+let resizeFrame = null;
+const resizeObserver = new ResizeObserver(() => {
+    if (resizeFrame) return;
+    resizeFrame = requestAnimationFrame(() => {
+        resizeFrame = null;
+        initCanvases();
+        redrawAll();
+    });
 });
+[binsCanvas, routesCanvas, networkCanvas].forEach(c => resizeObserver.observe(c.parentElement));
 
 async function startSystem() {
-    const zones = parseInt(document.getElementById('zones').value);
-    const bins = parseInt(document.getElementById('bins').value);
-    const trucks = parseInt(document.getElementById('trucks').value);
-    
     const config = {
-        zones: zones,
-        bins_per_zone: bins,
-        trucks_per_zone: trucks,
+        zones: parseInt($('zones').value, 10),
+        bins_per_zone: parseInt($('bins').value, 10),
+        trucks_per_zone: parseInt($('trucks').value, 10),
         update_interval: 3
     };
-    
+
+    startBtn.disabled = true;
     try {
-        const response = await fetch(`${API_BASE}/api/system/config`, {
+        const response = await adminFetch(`${API_BASE}/api/system/config`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(config)
         });
-        
-        if (response.ok) {
+        if (response && response.ok) {
             isRunning = true;
-            updateUIState();
+            addEvent('SYSTEM', `Started: ${config.zones} zones × ${config.bins_per_zone} bins`);
             startUpdates();
-            addEvent('SYSTEM', 'System started');
+        } else if (response && response.status === 422) {
+            addEvent('SYSTEM', 'Error: configuration out of range');
         }
     } catch (error) {
         console.error('Error starting system:', error);
         addEvent('SYSTEM', 'Error: ' + error.message);
     }
+    updateUIState();
 }
 
 async function stopSystem() {
     try {
-        const response = await fetch(`${API_BASE}/api/system/stop`, { method: 'POST' });
-        if (response.ok) {
+        const response = await adminFetch(`${API_BASE}/api/system/stop`, { method: 'POST' });
+        if (response && response.ok) {
             isRunning = false;
-            updateUIState();
             stopUpdates();
             addEvent('SYSTEM', 'System stopped');
         }
     } catch (error) {
         console.error('Error stopping system:', error);
     }
+    updateUIState();
 }
 
 async function triggerElection() {
+    triggerElectionBtn.disabled = true;
+    const label = triggerElectionBtn.textContent;
+    triggerElectionBtn.textContent = 'Electing…';
     try {
-        await fetch(`${API_BASE}/api/election/trigger`, {
+        const response = await adminFetch(`${API_BASE}/api/election/trigger`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ initiator_zone: null })
         });
-        addEvent('ELECTION', 'Election triggered');
+        if (response && response.ok) {
+            addEvent('ELECTION', 'Election triggered');
+            updateAllData();
+        }
     } catch (error) {
         console.error('Error:', error);
     }
+    triggerElectionBtn.textContent = label;
+    triggerElectionBtn.disabled = !isRunning;
+}
+
+function setPill(state) {
+    const labels = { live: 'Live', stopped: 'Stopped', offline: 'Offline' };
+    statusPill.className = 'pill pill-' + state;
+    statusPill.querySelector('.pill-text').textContent = labels[state];
 }
 
 function updateUIState() {
-    if (isRunning) {
-        startBtn.disabled = true;
-        stopBtn.disabled = false;
-        systemStatus.textContent = 'Running';
-        systemStatus.className = 'status-value status-running';
-        document.getElementById('zones').disabled = true;
-        document.getElementById('bins').disabled = true;
-        document.getElementById('trucks').disabled = true;
-    } else {
-        startBtn.disabled = false;
-        stopBtn.disabled = true;
-        systemStatus.textContent = 'Stopped';
-        systemStatus.className = 'status-value status-stopped';
-        document.getElementById('zones').disabled = false;
-        document.getElementById('bins').disabled = false;
-        document.getElementById('trucks').disabled = false;
-    }
+    startBtn.disabled = isRunning;
+    stopBtn.disabled = !isRunning;
+    triggerElectionBtn.disabled = !isRunning;
+    ['zones', 'bins', 'trucks'].forEach(id => { $(id).disabled = isRunning; });
+    setPill(isRunning ? 'live' : 'stopped');
 }
 
 function startUpdates() {
     if (updateInterval) clearInterval(updateInterval);
-    updateInterval = setInterval(updateAllData, 1000);
+    updateInterval = setInterval(updateAllData, POLL_MS);
     updateAllData();
 }
 
@@ -162,462 +316,630 @@ function stopUpdates() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Polling
+// ---------------------------------------------------------------------------
+
 async function updateAllData() {
     if (!isRunning) return;
-    
+
     try {
-        const [statusRes, binsRes, routesRes, networkRes, eventsRes] = await Promise.all([
+        const responses = await Promise.all([
             fetch(`${API_BASE}/api/system/status`),
             fetch(`${API_BASE}/api/bins`),
             fetch(`${API_BASE}/api/routes`),
             fetch(`${API_BASE}/api/network`),
             fetch(`${API_BASE}/api/events?limit=50`)
         ]);
-        
-        const status = await statusRes.json();
-        binsData = await binsRes.json();
-        routesData = await routesRes.json();
-        networkData = await networkRes.json();
-        eventsData = await eventsRes.json();
-        
+        if (responses.some(r => !r.ok)) throw new Error('Server returned an error');
+        const [status, bins, routes, network, events] = await Promise.all(responses.map(r => r.json()));
+
+        lastStatus = status;
+        binsData = bins;
+        routesData = routes;
+        networkData = network;
+        serverEvents = events;
+
+        if (!status.running) {
+            // Stopped by another admin
+            isRunning = false;
+            stopUpdates();
+            updateUIState();
+        } else {
+            setPill('live');
+        }
+        lastUpdatedEl.textContent = 'Updated ' + formatTime(new Date());
+
         updateStatusDisplay(status);
-        drawBinsMap();
-        drawRoutes();
-        drawNetwork();
+        redrawAll();
         updateEventLog();
         updateModuleStats(status);
     } catch (error) {
         console.error('Error:', error);
+        setPill('offline');
     }
 }
 
+// ---------------------------------------------------------------------------
+// KPIs
+// ---------------------------------------------------------------------------
+
 function updateStatusDisplay(status) {
-    if (status.bin_statistics) {
-        totalBinsEl.textContent = status.bin_statistics.total_bins || 0;
-        overflowingBinsEl.textContent = status.bin_statistics.overflowing_bins || 0;
-    }
-    
-    if (status.fog_nodes?.system_totals) {
-        routesCompletedEl.textContent = status.fog_nodes.system_totals.total_routes_completed || 0;
-    }
-    
-    if (status.election_status?.current_leader) {
-        currentLeaderEl.textContent = 'Zone ' + status.election_status.current_leader;
-        currentLeaderEl.className = 'status-value leader-active';
+    const bins = status.bin_statistics || {};
+    const totals = status.fog_nodes?.system_totals || {};
+    const nodes = Object.values(status.fog_nodes?.nodes || {});
+    const zones = status.configuration?.zones || nodes.length;
+
+    const total = bins.total_bins || 0;
+    const over = bins.overflowing_bins || 0;
+    const avg = bins.avg_fill_level || 0;
+    const activeRoutes = nodes.reduce((sum, n) => sum + (n.zone_status?.active_routes || 0), 0);
+
+    $('total-bins').textContent = total;
+    $('kpi-bins-sub').textContent = `across ${zones} zone${zones === 1 ? '' : 's'}`;
+    $('overflowing-bins').textContent = over;
+    $('overflow-meter').style.width = (total ? (over / total) * 100 : 0) + '%';
+    $('avg-fill').textContent = Math.round(avg) + '%';
+    $('avg-meter').style.width = Math.min(100, avg) + '%';
+    $('routes-completed').textContent = totals.total_routes_completed || 0;
+    $('kpi-routes-sub').textContent = `${activeRoutes} active now`;
+    $('spillovers').textContent = totals.total_spillovers || 0;
+
+    const election = status.election_status || {};
+    const leaderEl = $('current-leader');
+    if (election.current_leader) {
+        const leaderNode = (election.nodes || {})[election.current_leader] || {};
+        leaderEl.textContent = 'Zone ' + election.current_leader;
+        leaderEl.className = 'kpi-value leader-active';
+        $('kpi-term').textContent = `elected · term ${leaderNode.term || 0}`;
     } else {
-        currentLeaderEl.textContent = 'None';
-        currentLeaderEl.className = 'status-value leader-none';
+        leaderEl.textContent = 'None';
+        leaderEl.className = 'kpi-value leader-none';
+        $('kpi-term').textContent = 'no election yet';
     }
 }
+
+// ---------------------------------------------------------------------------
+// Bin fill gauges
+// ---------------------------------------------------------------------------
 
 function drawBinsMap() {
     const ctx = binsCtx;
-    const width = binsCanvas.parentElement.clientWidth;
-    const height = binsCanvas.parentElement.clientHeight;
-    const dpr = window.devicePixelRatio || 1;
-    
-    // Clear
-    ctx.fillStyle = '#0a0f1a';
-    ctx.fillRect(0, 0, width, height);
-    
-    if (!binsData.length) return;
-    
+    const { w, h } = clear(ctx, binsCanvas);
+    binHits = [];
+    if (!binsData.length) return emptyMessage(ctx, w, h, 'Waiting for bin telemetry…');
+
+    const leader = String(lastStatus?.election_status?.current_leader ?? '');
     const zones = [...new Set(binsData.map(b => b.zone_id))].sort((a, b) => a - b);
-    const zoneWidth = width / zones.length;
-    const maxBinsPerZone = Math.max(...zones.map(z => binsData.filter(b => b.zone_id === z).length));
-    const cols = 5;
-    const binSpacing = Math.min(55, (zoneWidth - 40) / cols);
-    const rowSpacing = Math.min(55, (height - 60) / Math.ceil(maxBinsPerZone / cols));
-    
-    // Zone separators
-    ctx.strokeStyle = '#1e293b';
-    ctx.lineWidth = 2;
-    for (let i = 1; i < zones.length; i++) {
-        const x = i * zoneWidth;
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, height);
+    const pad = 10;
+    const zoneW = (w - pad * (zones.length + 1)) / zones.length;
+    const zoneH = h - pad * 2;
+
+    zones.forEach((zoneId, zi) => {
+        const zx = pad + zi * (zoneW + pad);
+        const zy = pad;
+        const zoneBins = binsData.filter(b => b.zone_id === zoneId)
+            .sort((a, b) => a.bin_id.localeCompare(b.bin_id, undefined, { numeric: true }));
+        const over = zoneBins.filter(b => b.fill_level >= 80).length;
+        const isLeader = String(zoneId) === leader;
+
+        // Zone panel
+        roundRect(ctx, zx, zy, zoneW, zoneH, 8);
+        ctx.fillStyle = palette.surface;
+        ctx.fill();
+        ctx.strokeStyle = isLeader ? withAlpha(palette.leader, 0.55) : palette.border;
+        ctx.lineWidth = 1;
         ctx.stroke();
-    }
-    
-    zones.forEach((zoneId, zoneIndex) => {
-        const zoneBins = binsData.filter(b => b.zone_id === zoneId);
-        const startX = zoneIndex * zoneWidth;
-        
-        zoneBins.forEach((bin, idx) => {
-            const col = idx % cols;
-            const row = Math.floor(idx / cols);
-            const x = startX + 20 + col * binSpacing + binSpacing / 2;
-            const y = 50 + row * rowSpacing + rowSpacing / 2;
-            
-            const fill = bin.fill_level;
-            let color, glowColor;
-            if (fill < 80) { color = '#22c55e'; glowColor = 'rgba(34, 197, 94, 0.3)'; }
-            else if (fill < 85) { color = '#f59e0b'; glowColor = 'rgba(245, 158, 11, 0.3)'; }
-            else if (fill < 95) { color = '#f97316'; glowColor = 'rgba(249, 115, 22, 0.3)'; }
-            else { color = '#ef4444'; glowColor = 'rgba(239, 68, 68, 0.3)'; }
-            
-            // Glow effect
-            ctx.beginPath();
-            ctx.arc(x, y, 18, 0, Math.PI * 2);
-            ctx.fillStyle = glowColor;
+
+        // Header
+        ctx.textBaseline = 'middle';
+        ctx.textAlign = 'left';
+        ctx.fillStyle = palette.text;
+        ctx.font = font(12.5, 600);
+        const title = 'Zone ' + zoneId;
+        ctx.fillText(title, zx + 10, zy + 16);
+        if (isLeader && zoneW > 150) {
+            const tx = zx + 10 + ctx.measureText(title).width + 6;
+            ctx.fillStyle = palette.leader;
+            ctx.font = font(10.5, 700);
+            ctx.fillText('★ LEADER', tx, zy + 16.5);
+        }
+        if (zoneW > 110) {
+            ctx.textAlign = 'right';
+            ctx.font = font(11, 500);
+            ctx.fillStyle = over ? palette.critical : palette.faint;
+            ctx.fillText(`${over}/${zoneBins.length} over`, zx + zoneW - 10, zy + 16);
+        }
+
+        // Pick the column count that gives the largest gauge
+        const innerX = zx + 8, innerY = zy + 32, innerW = zoneW - 16, innerH = zoneH - 38;
+        const n = zoneBins.length;
+        let best = { cols: 1, gw: 0 };
+        for (let cols = 1; cols <= n; cols++) {
+            const rows = Math.ceil(n / cols);
+            const gw = Math.min((innerW / cols) * 0.55, (innerH / rows - 16) / 1.35, 26);
+            if (gw > best.gw) best = { cols, gw };
+        }
+        const cols = best.cols;
+        const rows = Math.ceil(n / cols);
+        const cw = innerW / cols, ch = innerH / rows;
+        const gw = Math.max(6, best.gw), gh = gw * 1.3;
+        const showLabel = ch - gh >= 14 && cw >= 24;
+
+        zoneBins.forEach((bin, i) => {
+            const cx = innerX + (i % cols) * cw + cw / 2;
+            const cy = innerY + Math.floor(i / cols) * ch + (ch - gh - (showLabel ? 13 : 0)) / 2;
+            const gx = cx - gw / 2;
+            const fill = Math.max(0, Math.min(100, bin.fill_level));
+            const color = tierColor(fill);
+
+            // Lid
+            ctx.fillStyle = palette.borderStrong;
+            roundRect(ctx, gx - 1.5, cy - 3.5, gw + 3, 2.5, 1.2);
             ctx.fill();
-            
-            // Bin circle
-            ctx.beginPath();
-            ctx.arc(x, y, 14, 0, Math.PI * 2);
-            ctx.fillStyle = color;
+
+            // Body
+            roundRect(ctx, gx, cy, gw, gh, 3);
+            ctx.fillStyle = palette.surface2;
             ctx.fill();
-            ctx.strokeStyle = '#fff';
-            ctx.lineWidth = 2;
+
+            // Fill level
+            const fh = (gh - 2) * fill / 100;
+            if (fh > 0) {
+                ctx.save();
+                roundRect(ctx, gx, cy, gw, gh, 3);
+                ctx.clip();
+                ctx.fillStyle = color;
+                ctx.fillRect(gx, cy + gh - fh - 1, gw, fh + 1);
+                ctx.restore();
+            }
+
+            roundRect(ctx, gx, cy, gw, gh, 3);
+            ctx.strokeStyle = fill >= 80 ? color : palette.borderStrong;
+            ctx.lineWidth = 1;
             ctx.stroke();
-            
-            // Percentage
-            ctx.fillStyle = '#fff';
-            ctx.font = `bold ${Math.max(10, 12 * dpr / 2)}px Arial`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(Math.round(fill) + '%', x, y + 1);
+
+            if (showLabel) {
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'top';
+                ctx.font = font(10.5, fill >= 80 ? 700 : 500);
+                ctx.fillStyle = fill >= 80 ? color : palette.muted;
+                ctx.fillText(Math.round(fill) + '%', cx, cy + gh + 3);
+            }
+
+            binHits.push({ x: gx - 4, y: cy - 4, w: gw + 8, h: gh + (showLabel ? 16 : 8), bin });
         });
-        
-        // Zone label
-        ctx.fillStyle = '#3b82f6';
-        ctx.font = `bold ${Math.max(14, 16 * dpr / 2)}px Arial`;
-        ctx.textAlign = 'center';
-        ctx.fillText('Zone ' + zoneId, startX + zoneWidth / 2, 25);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Route map (bins at their real coordinates)
+// ---------------------------------------------------------------------------
+
+function sortedRoutes() {
+    return [...routesData].sort((a, b) =>
+        a.zone_id !== b.zone_id ? a.zone_id - b.zone_id : a.truck_id.localeCompare(b.truck_id));
+}
+
+function truckLabel(route) {
+    const m = /truck_\d+_(\d+)/.exec(route.truck_id);
+    return `Zone ${route.zone_id} · Truck ${m ? m[1] : route.truck_id}`;
+}
+
+function renderRouteLegend() {
+    const el = $('route-legend');
+    el.textContent = '';
+    sortedRoutes().forEach((route, ri) => {
+        const chip = document.createElement('span');
+        chip.className = 'chip';
+        const sw = document.createElement('i');
+        sw.className = 'swatch';
+        sw.style.background = ROUTE_COLORS[ri % ROUTE_COLORS.length];
+        chip.append(sw, `${truckLabel(route)} · ${route.bin_count} stops · ${route.total_distance.toFixed(1)} u`);
+        el.append(chip);
     });
 }
 
 function drawRoutes() {
     const ctx = routesCtx;
-    const width = routesCanvas.parentElement.clientWidth;
-    const height = routesCanvas.parentElement.clientHeight;
-    const dpr = window.devicePixelRatio || 1;
-    
-    ctx.fillStyle = '#0a0f1a';
-    ctx.fillRect(0, 0, width, height);
-    
+    const { w, h } = clear(ctx, routesCanvas);
+    routeHits = [];
+    renderRouteLegend();
+    if (!binsData.length) return emptyMessage(ctx, w, h, 'Waiting for bin telemetry…');
+
+    // Bins are placed at x = (zone-1)*100 + [0, 80), y = [0, 80)
+    const zoneCount = Math.max(lastStatus?.configuration?.zones || 0,
+        ...binsData.map(b => Math.floor(b.x / 100) + 1));
+    const worldW = zoneCount * 100;
+    const worldH = 85;
+    const pad = 22, top = 28;
+    const scale = Math.min((w - pad * 2) / worldW, (h - top - pad) / worldH);
+    const ox = (w - worldW * scale) / 2;
+    const oy = top + (h - top - pad - worldH * scale) / 2;
+    const px = (x) => ox + (x + 10) * scale;
+    const py = (y) => oy + (y + 2.5) * scale;
+
+    // Zone bands
+    for (let z = 0; z < zoneCount; z++) {
+        const x0 = ox + z * 100 * scale, x1 = ox + (z + 1) * 100 * scale;
+        ctx.fillStyle = z % 2 ? palette.plot : palette.surface;
+        roundRect(ctx, x0 + 2, oy, x1 - x0 - 4, worldH * scale, 6);
+        ctx.fill();
+        ctx.strokeStyle = palette.border;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.fillStyle = palette.faint;
+        ctx.font = font(11, 600);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText('ZONE ' + (z + 1), x0 + 6, oy - 6);
+    }
+
+    // All bins, coloured by tier
+    const onRoute = new Set(routesData.flatMap(r => (r.bins || []).map(b => b.bin_id)));
+    binsData.forEach(bin => {
+        ctx.beginPath();
+        ctx.arc(px(bin.x), py(bin.y), 3.5, 0, Math.PI * 2);
+        ctx.fillStyle = withAlpha(tierColor(bin.fill_level), onRoute.has(bin.bin_id) ? 1 : 0.6);
+        ctx.fill();
+    });
+
     if (!routesData.length) {
-        ctx.fillStyle = '#64748b';
-        ctx.font = '14px Arial';
+        const msg = 'No active routes — trucks are dispatched when bins reach 80%';
+        ctx.font = font(12.5);
+        const tw = ctx.measureText(msg).width + 28;
+        roundRect(ctx, w / 2 - tw / 2, h / 2 - 15, tw, 30, 15);
+        ctx.fillStyle = palette.surface;
+        ctx.fill();
+        ctx.strokeStyle = palette.border;
+        ctx.stroke();
+        ctx.fillStyle = palette.muted;
         ctx.textAlign = 'center';
-        ctx.fillText('No active routes', width / 2, height / 2);
+        ctx.textBaseline = 'middle';
+        ctx.fillText(msg, w / 2, h / 2);
         return;
     }
 
-    const orderedRoutes = [...routesData].sort((a, b) => {
-        if (a.zone_id !== b.zone_id) return a.zone_id - b.zone_id;
-        return a.truck_id.localeCompare(b.truck_id);
-    });
+    sortedRoutes().forEach((route, ri) => {
+        const color = ROUTE_COLORS[ri % ROUTE_COLORS.length];
+        const pts = (route.bins || []).map(b => ({ x: px(b.x), y: py(b.y), bin: b }));
+        if (!pts.length) return;
 
-    const laneCount = orderedRoutes.length;
-    const laneGap = 14;
-    const horizontalPadding = 16;
-    const availableWidth = width - horizontalPadding * 2 - laneGap * (laneCount - 1);
-    const laneWidth = availableWidth / Math.max(laneCount, 1);
-    const colors = ['#7c3aed', '#f59e0b', '#22c55e', '#38bdf8', '#ef4444', '#14b8a6'];
-
-    orderedRoutes.forEach((route, index) => {
-        const laneX = horizontalPadding + index * (laneWidth + laneGap);
-        const laneY = 18;
-        const laneH = height - 36;
-        const laneColor = colors[index % colors.length];
-
-        // Lane card
-        ctx.fillStyle = 'rgba(15, 23, 42, 0.7)';
-        ctx.strokeStyle = 'rgba(71, 85, 105, 0.65)';
-        ctx.lineWidth = 1.5;
+        // Path in visit order
+        ctx.strokeStyle = withAlpha(color, 0.85);
+        ctx.lineWidth = 2.25;
+        ctx.lineJoin = 'round';
+        ctx.setLineDash([6, 4]);
         ctx.beginPath();
-        ctx.roundRect(laneX, laneY, laneWidth, laneH, 12);
-        ctx.fill();
+        pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
         ctx.stroke();
-
-        // Header chip
-        const chipW = Math.min(120, laneWidth - 18);
-        const chipX = laneX + (laneWidth - chipW) / 2;
-        ctx.fillStyle = laneColor;
-        ctx.beginPath();
-        ctx.roundRect(chipX, laneY + 12, chipW, 28, 8);
-        ctx.fill();
-        ctx.strokeStyle = '#e2e8f0';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-
-        ctx.fillStyle = '#ffffff';
-        ctx.font = `bold ${Math.max(10, 11 * dpr / 2)}px Arial`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        const truckLabel = route.truck_id.replace('truck_', 'T');
-        ctx.fillText(`Z${route.zone_id} ${truckLabel}`, laneX + laneWidth / 2, laneY + 26);
-
-        // Truck marker
-        const truckX = laneX + laneWidth / 2;
-        const truckY = laneY + 64;
-        ctx.fillStyle = laneColor;
-        ctx.beginPath();
-        ctx.roundRect(truckX - 18, truckY - 12, 36, 24, 7);
-        ctx.fill();
-        ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-
-        const bins = route.bins || [];
-        const routeTop = truckY + 22;
-        const routeBottom = laneY + laneH - 44;
-        const pathHeight = Math.max(60, routeBottom - routeTop);
-        const binSpacing = bins.length ? pathHeight / Math.max(bins.length, 1) : 0;
-        const offset = Math.min(laneWidth * 0.24, 42);
-
-        const points = bins.map((bin, idx) => {
-            const side = idx % 2 === 0 ? -1 : 1;
-            return {
-                x: truckX + side * offset,
-                y: routeTop + binSpacing * (idx + 0.5),
-                bin
-            };
-        });
-
-        // Path segments in visit order
-        let prev = { x: truckX, y: truckY + 12 };
-        ctx.strokeStyle = laneColor;
-        ctx.lineWidth = 2.5;
-        ctx.setLineDash([7, 5]);
-        points.forEach((point) => {
-            const controlX = (prev.x + point.x) / 2;
-            const controlY = prev.y + (point.y - prev.y) * 0.15;
-            ctx.beginPath();
-            ctx.moveTo(prev.x, prev.y);
-            ctx.quadraticCurveTo(controlX, controlY, point.x, point.y);
-            ctx.stroke();
-            prev = point;
-        });
         ctx.setLineDash([]);
 
-        // Bin markers
-        points.forEach((point, idx) => {
+        // Direction arrows at segment midpoints
+        for (let i = 1; i < pts.length; i++) {
+            const a = pts[i - 1], b = pts[i];
+            if (Math.hypot(b.x - a.x, b.y - a.y) < 34) continue;
+            ctx.save();
+            ctx.translate((a.x + b.x) / 2, (a.y + b.y) / 2);
+            ctx.rotate(Math.atan2(b.y - a.y, b.x - a.x));
             ctx.beginPath();
-            ctx.arc(point.x, point.y, 13, 0, Math.PI * 2);
-            ctx.fillStyle = 'rgba(239, 68, 68, 0.26)';
+            ctx.moveTo(4.5, 0); ctx.lineTo(-3.5, -4); ctx.lineTo(-3.5, 4); ctx.closePath();
+            ctx.fillStyle = color;
             ctx.fill();
+            ctx.restore();
+        }
 
+        // Numbered stops
+        pts.forEach((p, i) => {
+            const r = 8.5;
             ctx.beginPath();
-            ctx.arc(point.x, point.y, 10.5, 0, Math.PI * 2);
-            ctx.fillStyle = '#ef4444';
+            ctx.arc(p.x, p.y, r + 3, 0, Math.PI * 2);
+            ctx.fillStyle = withAlpha(color, 0.18);
             ctx.fill();
-            ctx.strokeStyle = '#ffffff';
-            ctx.lineWidth = 1.8;
-            ctx.stroke();
-
-            ctx.fillStyle = '#ffffff';
-            ctx.font = `bold ${Math.max(9, 10 * dpr / 2)}px Arial`;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+            ctx.fillStyle = color;
+            ctx.fill();
+            ctx.fillStyle = '#fff';
+            ctx.font = font(9.5, 700);
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillText(String(idx + 1), point.x, point.y + 0.5);
+            ctx.fillText(String(i + 1), p.x, p.y + 0.5);
+            routeHits.push({ x: p.x, y: p.y, r: r + 3, route, stop: i + 1, bin: p.bin });
         });
-
-        // Route summary
-        ctx.fillStyle = '#94a3b8';
-        ctx.font = `${Math.max(10, 11 * dpr / 2)}px Arial`;
-        ctx.textAlign = 'center';
-        ctx.fillText(
-            `${route.bin_count} bins | ${route.total_distance.toFixed(1)} km`,
-            laneX + laneWidth / 2,
-            laneY + laneH - 18
-        );
     });
 }
+
+// ---------------------------------------------------------------------------
+// Fog node network
+// ---------------------------------------------------------------------------
 
 function drawNetwork() {
     const ctx = networkCtx;
-    const width = networkCanvas.parentElement.clientWidth;
-    const height = networkCanvas.parentElement.clientHeight;
-    const dpr = window.devicePixelRatio || 1;
-    
-    ctx.fillStyle = '#0a0f1a';
-    ctx.fillRect(0, 0, width, height);
-    
-    if (!networkData.nodes.length) return;
-
-    const topPadding = 58;
-    const bottomPadding = 54;
-    const sidePadding = 58;
-    const layoutHeight = Math.max(80, height - topPadding - bottomPadding);
-    const centerX = width / 2;
-    const centerY = topPadding + layoutHeight / 2;
-    const radius = Math.max(
-        50,
-        Math.min((width - sidePadding * 2) / 2, layoutHeight / 2) - 38
-    );
-    const nodePositions = {};
+    const { w, h } = clear(ctx, networkCanvas);
+    if (!networkData.nodes.length) return emptyMessage(ctx, w, h, 'No fog nodes');
 
     const nodes = [...networkData.nodes].sort((a, b) => Number(a.id) - Number(b.id));
-
-    // Calculate node positions in a padded circle to avoid clipping.
-    nodes.forEach((node, index) => {
-        const angle = (index / nodes.length) * Math.PI * 2 - Math.PI / 2;
-        nodePositions[node.id] = {
-            x: centerX + Math.cos(angle) * radius,
-            y: centerY + Math.sin(angle) * radius
-        };
+    const cx = w / 2, cy = h / 2 + 8;
+    const nodeR = Math.max(17, Math.min(28, Math.min(w, h) / (nodes.length > 6 ? 12 : 9)));
+    const ringR = nodes.length === 1 ? 0 : Math.max(40, Math.min(w / 2 - nodeR - 40, h / 2 - nodeR - 36));
+    const pos = {};
+    nodes.forEach((node, i) => {
+        const ang = (i / nodes.length) * Math.PI * 2 - Math.PI / 2;
+        pos[node.id] = { x: cx + Math.cos(ang) * ringR, y: cy + Math.sin(ang) * ringR };
     });
-    
-    // Draw unique connection lines.
-    ctx.strokeStyle = 'rgba(100, 116, 139, 0.55)';
-    ctx.lineWidth = 2.2;
-    ctx.setLineDash([8, 4]);
+    const leader = nodes.find(n => n.is_leader);
 
-    const drawnEdges = new Set();
+    // Edges: peer links faint, leader links highlighted
+    const drawn = new Set();
     networkData.edges.forEach(edge => {
-        const minNode = Math.min(edge.from, edge.to);
-        const maxNode = Math.max(edge.from, edge.to);
-        const edgeKey = `${minNode}-${maxNode}`;
-        if (drawnEdges.has(edgeKey)) return;
-        drawnEdges.add(edgeKey);
-
-        const from = nodePositions[edge.from];
-        const to = nodePositions[edge.to];
-        if (from && to) {
-            ctx.beginPath();
-            ctx.moveTo(from.x, from.y);
-            ctx.lineTo(to.x, to.y);
-            ctx.stroke();
-        }
+        const key = [edge.from, edge.to].sort().join('-');
+        if (drawn.has(key)) return;
+        drawn.add(key);
+        const a = pos[edge.from], b = pos[edge.to];
+        if (!a || !b) return;
+        const leaderEdge = leader && (edge.from === leader.id || edge.to === leader.id);
+        ctx.strokeStyle = leaderEdge ? withAlpha(palette.leader, 0.6) : palette.borderStrong;
+        ctx.lineWidth = leaderEdge ? 1.75 : 1;
+        ctx.setLineDash(leaderEdge ? [] : [4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
     });
-    
     ctx.setLineDash([]);
-    
-    // Draw nodes
-    const nodeRadius = Math.max(26, Math.min(42, radius / 2.8));
-    
+
+    const binsPerZone = Math.max(1, lastStatus?.configuration?.bins_per_zone || 15);
     nodes.forEach(node => {
-        const pos = nodePositions[node.id];
-        if (!pos) return;
-        
-        // Outer glow for leader
+        const p = pos[node.id];
+        const color = node.is_leader ? palette.leader : palette.info;
+
         if (node.is_leader) {
             ctx.beginPath();
-            ctx.arc(pos.x, pos.y, nodeRadius + 8, 0, Math.PI * 2);
-            ctx.fillStyle = 'rgba(251, 191, 36, 0.3)';
+            ctx.arc(p.x, p.y, nodeR + 6, 0, Math.PI * 2);
+            ctx.fillStyle = withAlpha(color, 0.16);
             ctx.fill();
         }
-        
-        // Node circle
+
         ctx.beginPath();
-        ctx.arc(pos.x, pos.y, nodeRadius, 0, Math.PI * 2);
-        const gradient = ctx.createRadialGradient(
-            pos.x - nodeRadius/3, pos.y - nodeRadius/3, 0,
-            pos.x, pos.y, nodeRadius
-        );
-        if (node.is_leader) {
-            gradient.addColorStop(0, '#fcd34d');
-            gradient.addColorStop(1, '#f59e0b');
-        } else {
-            gradient.addColorStop(0, '#60a5fa');
-            gradient.addColorStop(1, '#3b82f6');
-        }
-        ctx.fillStyle = gradient;
+        ctx.arc(p.x, p.y, nodeR, 0, Math.PI * 2);
+        ctx.fillStyle = palette.surface;
         ctx.fill();
-        ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 3;
+        ctx.lineWidth = 2.5;
+        ctx.strokeStyle = color;
         ctx.stroke();
-        
-        // Inner circle
-        ctx.beginPath();
-        ctx.arc(pos.x, pos.y, nodeRadius * 0.6, 0, Math.PI * 2);
-        ctx.fillStyle = '#1e293b';
-        ctx.fill();
-        
-        // Zone label
-        ctx.fillStyle = '#fff';
-        ctx.font = `bold ${Math.max(14, 18 * dpr / 2)}px Arial`;
+
+        // Load arc: share of this zone's bins that are overflowing
+        const load = Math.min(1, (node.active_bins || 0) / binsPerZone);
+        if (load > 0) {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, nodeR - 5, -Math.PI / 2, -Math.PI / 2 + load * Math.PI * 2);
+            ctx.strokeStyle = palette.critical;
+            ctx.lineWidth = 3;
+            ctx.stroke();
+        }
+
+        ctx.fillStyle = palette.text;
+        ctx.font = font(Math.round(nodeR * 0.55), 700);
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText('Z' + node.id, pos.x, pos.y);
-        
-        // Leader badge
-        if (node.is_leader) {
-            ctx.fillStyle = '#fbbf24';
-            ctx.font = `bold ${Math.max(10, 12 * dpr / 2)}px Arial`;
-            ctx.fillText('LEADER', pos.x, pos.y - nodeRadius - 15);
-        }
-        
-        // State label
-        ctx.fillStyle = '#94a3b8';
-        ctx.font = `${Math.max(9, 11 * dpr / 2)}px Arial`;
-        ctx.fillText(node.state, pos.x, pos.y + nodeRadius + 16);
+        ctx.fillText('Z' + node.id, p.x, p.y + 0.5);
+
+        haloText(ctx, node.state || '', p.x, p.y + nodeR + 13, font(10, 600),
+            node.is_leader ? palette.leader : palette.faint);
+        haloText(ctx, `${node.active_bins || 0} over · ${node.routes_completed || 0} done`,
+            p.x, p.y + nodeR + 26, font(10, 500), palette.muted);
     });
-    
+
     // Legend
-    const legendY = height - 18;
-    ctx.font = `${Math.max(11, 12 * dpr / 2)}px Arial`;
-    
-    ctx.fillStyle = '#fbbf24';
-    ctx.beginPath();
-    ctx.arc(25, legendY - 4, 8, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillText('Leader', 40, legendY);
-    
-    ctx.fillStyle = '#3b82f6';
-    ctx.beginPath();
-    ctx.arc(100, legendY - 4, 8, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillText('Follower', 115, legendY);
+    const items = [[palette.leader, 'Leader', false], [palette.info, 'Follower', false], [palette.critical, 'Overflow load', true]];
+    ctx.font = font(11);
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    let lx = 12;
+    items.forEach(([color, label, arc]) => {
+        ctx.beginPath();
+        ctx.arc(lx + 5, 16, 4.5, arc ? -Math.PI / 2 : 0, arc ? Math.PI : Math.PI * 2);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = arc ? 2.5 : 2;
+        ctx.stroke();
+        ctx.fillStyle = palette.muted;
+        ctx.fillText(label, lx + 15, 16);
+        lx += 15 + ctx.measureText(label).width + 14;
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Tooltips
+// ---------------------------------------------------------------------------
+
+function attachTooltip(canvas, tooltip, findHit, render) {
+    canvas.addEventListener('mousemove', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        const hit = findHit(mx, my);
+        if (!hit) {
+            tooltip.hidden = true;
+            return;
+        }
+        tooltip.textContent = '';
+        render(tooltip, hit);
+        tooltip.hidden = false;
+        tooltip.style.left = Math.min(Math.max(mx, 80), rect.width - 80) + 'px';
+        tooltip.style.top = Math.max(my, 52) + 'px';
+    });
+    canvas.addEventListener('mouseleave', () => { tooltip.hidden = true; });
+}
+
+function tooltipLines(tooltip, title, lines) {
+    const strong = document.createElement('strong');
+    strong.textContent = title;
+    tooltip.append(strong);
+    lines.forEach(line => tooltip.append(document.createElement('br'), line));
+}
+
+attachTooltip(binsCanvas, $('bins-tooltip'),
+    (x, y) => binHits.find(r => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h),
+    (tip, hit) => {
+        const fill = hit.bin.fill_level;
+        tooltipLines(tip, hit.bin.bin_id, [`${fill.toFixed(1)}% · ${tierOf(fill).label} priority`]);
+    });
+
+attachTooltip(routesCanvas, $('routes-tooltip'),
+    (x, y) => routeHits.find(r => Math.hypot(x - r.x, y - r.y) <= r.r),
+    (tip, hit) => tooltipLines(tip, truckLabel(hit.route),
+        [`Stop ${hit.stop} of ${hit.route.bin_count}: ${hit.bin.bin_id}`]));
+
+// ---------------------------------------------------------------------------
+// Event log
+// ---------------------------------------------------------------------------
+
+function eventKey(e) {
+    return e.timestamp + '|' + e.type + '|' + e.message;
 }
 
 function updateEventLog() {
-    eventLogEl.innerHTML = '';
-    
-    eventsData.slice(-20).forEach(event => {
-        const eventEl = document.createElement('div');
-        eventEl.className = 'event-item';
-        
-        const time = new Date(event.timestamp).toLocaleTimeString([], { hour12: false });
-        const typeClass = 'event-type-' + event.type;
-        
-        eventEl.innerHTML = '<span class="event-timestamp">' + time + '</span>' +
-            '<span class="event-type ' + typeClass + '">' + event.type + '</span>' +
-            '<span class="event-message">' + event.message + '</span>';
-        
-        eventLogEl.appendChild(eventEl);
+    const events = serverEvents.concat(localEvents)
+        .map(e => ({ ...e, date: new Date(e.timestamp) }))
+        .sort((a, b) => b.date - a.date)
+        .slice(0, 40);
+
+    eventLogEl.textContent = '';
+    if (!events.length) {
+        const li = document.createElement('li');
+        li.className = 'empty';
+        li.textContent = 'No events yet';
+        eventLogEl.append(li);
+        return;
+    }
+
+    const firstRender = seenEventKeys.size === 0;
+    events.forEach(event => {
+        const key = eventKey(event);
+        const li = document.createElement('li');
+        li.className = 'event-item';
+        if (!firstRender && !seenEventKeys.has(key)) li.classList.add('is-new');
+        seenEventKeys.add(key);
+
+        const time = document.createElement('span');
+        time.className = 'event-time';
+        time.textContent = isNaN(event.date) ? '' : formatTime(event.date);
+
+        const type = document.createElement('span');
+        type.className = 'event-type event-type-' + event.type;
+        type.textContent = event.type;
+
+        const msg = document.createElement('span');
+        msg.className = 'event-message';
+        msg.textContent = event.message;
+
+        li.append(time, type, msg);
+        eventLogEl.append(li);
     });
-    
-    eventLogEl.scrollTop = eventLogEl.scrollHeight;
+
+    if (seenEventKeys.size > 500) seenEventKeys = new Set(events.map(eventKey));
 }
 
 function addEvent(type, message) {
-    eventsData.push({
-        timestamp: new Date().toISOString(),
-        type: type,
-        message: message
-    });
-    if (eventsData.length > 100) eventsData.shift();
+    localEvents.push({ timestamp: new Date().toISOString(), type, message });
+    if (localEvents.length > 30) localEvents.shift();
     updateEventLog();
 }
 
+// ---------------------------------------------------------------------------
+// Module cards
+// ---------------------------------------------------------------------------
+
+function renderStats(id, rows) {
+    const dl = $(id);
+    dl.textContent = '';
+    rows.forEach(([label, value, cls]) => {
+        const row = document.createElement('div');
+        const dt = document.createElement('dt');
+        dt.textContent = label;
+        const dd = document.createElement('dd');
+        dd.textContent = value;
+        if (cls) dd.className = cls;
+        row.append(dt, dd);
+        dl.append(row);
+    });
+}
+
 function updateModuleStats(status) {
-    if (status.fog_nodes?.system_totals) {
-        const totals = status.fog_nodes.system_totals;
-        const activeRoutes = Object.values(status.fog_nodes.nodes || {}).reduce(
-            (sum, node) => sum + (node.zone_status?.active_routes || 0), 0
-        );
-        document.getElementById('route-stats').innerHTML = 
-            '<span>Active: ' + activeRoutes + '</span>' +
-            '<span>Completed: ' + (totals.total_routes_completed || 0) + '</span>';
-        document.getElementById('comm-stats').innerHTML = 
-            '<span>Peers: ' + Math.max(0, Object.keys(status.fog_nodes.nodes || {}).length - 1) + '</span>' +
-            '<span>Spillovers: ' + (totals.total_spillovers || 0) + '</span>';
-    }
-    
-    if (status.election_status) {
-        const election = status.election_status;
-        const leaderNode = Object.values(election.nodes || {}).find(n => n.state === 'LEADER');
-        document.getElementById('election-stats').innerHTML = 
-            '<span>State: ' + (election.current_leader ? 'LEADER_ELECTED' : 'ELECTING') + '</span>' +
-            '<span>Term: ' + (leaderNode?.term || 0) + '</span>';
+    const nodes = Object.values(status.fog_nodes?.nodes || {});
+    const totals = status.fog_nodes?.system_totals || {};
+    const sum = (fn) => nodes.reduce((acc, n) => acc + (fn(n) || 0), 0);
+
+    renderStats('route-stats', [
+        ['Active routes', sum(n => n.zone_status?.active_routes)],
+        ['Completed', totals.total_routes_completed || 0],
+        ['Bins serviced', totals.total_bins_serviced || 0],
+    ]);
+
+    const peers = nodes.map(n => n.communication_status?.peer_discovery?.total_peers || 0);
+    renderStats('comm-stats', [
+        ['Peers per node', nodes.length ? `${Math.min(...peers)} of ${Math.max(0, nodes.length - 1)}` : '—'],
+        ['Messages sent', sum(n => n.communication_status?.message_router?.messages_sent).toLocaleString()],
+        ['Spillovers ok / rejected',
+            `${sum(n => n.communication_status?.spillover_manager?.completed_spillovers)} / ${sum(n => n.communication_status?.spillover_manager?.rejected_spillovers)}`],
+    ]);
+
+    const election = status.election_status || {};
+    const leaderNode = (election.nodes || {})[election.current_leader] || {};
+    renderStats('election-stats', [
+        ['State', election.current_leader ? 'Leader elected' : 'Electing', election.current_leader ? 'ok' : ''],
+        ['Leader', election.current_leader ? 'Zone ' + election.current_leader : '—'],
+        ['Term', leaderNode.term || 0],
+    ]);
+
+    const ledger = status.fog_nodes?.ledger;
+    renderStats('ledger-stats', ledger ? [
+        ['Blocks', ledger.blocks],
+        ['Committed events', (ledger.committed_transactions || 0).toLocaleString()],
+        ['Quorum', `${ledger.quorum_size} of ${ledger.validators}`],
+        ['Chain integrity', ledger.chain_valid ? 'Verified' : 'Broken', ledger.chain_valid ? 'ok' : 'bad'],
+    ] : [['Status', 'Unavailable']]);
+}
+
+// ---------------------------------------------------------------------------
+// Startup
+// ---------------------------------------------------------------------------
+
+// Viewer mode: the simulation is shared by every visitor, so if it is already
+// running (e.g. autostarted on the server) attach to it instead of restarting it.
+async function attachToRunningSystem() {
+    try {
+        const response = await fetch(`${API_BASE}/api/system/status`);
+        if (!response.ok) return false;
+        const status = await response.json();
+        if (!status.running) return false;
+
+        const config = status.configuration || {};
+        if (config.zones) $('zones').value = config.zones;
+        if (config.bins_per_zone) $('bins').value = config.bins_per_zone;
+        if (config.trucks_per_zone) $('trucks').value = config.trucks_per_zone;
+
+        isRunning = true;
+        updateUIState();
+        startUpdates();
+        return true;
+    } catch (error) {
+        console.error('Error reading system status:', error);
+        setPill('offline');
+        return false;
     }
 }
 
-// Initialize
+readPalette();
 initCanvases();
 updateUIState();
-addEvent('SYSTEM', 'Web UI ready. Click Start System to begin.');
+redrawAll();
+renderStats('route-stats', [['Active routes', 0], ['Completed', 0], ['Bins serviced', 0]]);
+renderStats('comm-stats', [['Peers per node', '—'], ['Messages sent', 0], ['Spillovers ok / rejected', '0 / 0']]);
+renderStats('election-stats', [['State', 'Idle'], ['Leader', '—'], ['Term', 0]]);
+renderStats('ledger-stats', [['Blocks', 0], ['Committed events', 0], ['Quorum', '—'], ['Chain integrity', '—']]);
+attachToRunningSystem().then(attached => {
+    addEvent('SYSTEM', attached
+        ? 'Dashboard attached to the running simulation'
+        : 'Dashboard ready — press Start to run the simulation');
+});
