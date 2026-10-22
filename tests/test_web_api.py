@@ -68,6 +68,16 @@ class TestWebAPI(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
 
+    def test_health_reports_cloud_sync_disabled_without_supabase(self):
+        self.assertEqual(self.client.get("/health").json()["cloud"], {"enabled": False})
+
+    def test_cloud_snapshot_is_json_serializable(self):
+        import json
+        snap = web_app.build_snapshot()
+        for key in ("status", "bins", "routes", "network", "events", "generated_at"):
+            self.assertIn(key, snap)
+        json.dumps(snap)   # what the publisher sends must encode without a fallback
+
     def test_index_and_static_assets(self):
         page = self.client.get("/")
         self.assertEqual(page.status_code, 200)

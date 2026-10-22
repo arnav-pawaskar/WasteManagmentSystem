@@ -28,12 +28,16 @@ from pydantic import BaseModel, Field
 
 from simulation.bin_simulator import BinSimulator
 from simulation.fog_node_simulator import FogNodeSimulator
+from web.cloud_publisher import CloudPublisher
 
 WEB_DIR = Path(__file__).resolve().parent
 
 # Global system instance, swapped under _system_lock
 system_instance = None
 _system_lock = threading.Lock()
+
+# Pushes snapshots to Supabase when SUPABASE_URL / SUPABASE_SECRET_KEY are set
+cloud_publisher: Optional[CloudPublisher] = None
 
 class SmartWasteSystem:
     """Wrapper class for the complete system with web API"""
@@ -251,19 +255,41 @@ def _autostart_enabled() -> bool:
     return os.environ.get("AUTOSTART", "true").strip().lower() in ("1", "true", "yes")
 
 
+def build_snapshot(event_limit: int = 30) -> Optional[dict]:
+    """Everything the dashboard needs in one document (what /api/* return together)."""
+    system = system_instance
+    if not system:
+        return None
+    return {
+        "generated_at": datetime.now().astimezone().isoformat(),
+        "status": system.get_status(),
+        "bins": system.get_bins_data(),
+        "routes": system.get_routes_data(),
+        "network": system.get_network_topology(),
+        "events": system.get_events(event_limit),
+    }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start a default simulation so the public dashboard is live on first visit."""
-    global system_instance
+    global system_instance, cloud_publisher
     if _autostart_enabled():
         with _system_lock:
             if not system_instance:
                 system_instance = SmartWasteSystem()
             system_instance.start()
+
+    cloud_publisher = CloudPublisher.from_env(build_snapshot)
+    if cloud_publisher:
+        cloud_publisher.start()
     yield
     with _system_lock:
         if system_instance:
             system_instance.stop()
+    if cloud_publisher:
+        cloud_publisher.publish_once()   # leave the cloud showing "stopped"
+        cloud_publisher.stop()
 
 
 app = FastAPI(
@@ -287,7 +313,11 @@ def index():
 @app.get("/health", tags=["public"])
 def health():
     """Liveness check"""
-    return {"status": "ok", "running": bool(system_instance and system_instance.running)}
+    return {
+        "status": "ok",
+        "running": bool(system_instance and system_instance.running),
+        "cloud": cloud_publisher.get_status() if cloud_publisher else {"enabled": False},
+    }
 
 @app.get("/api/system/status", tags=["public"])
 def api_system_status():

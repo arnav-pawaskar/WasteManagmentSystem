@@ -161,6 +161,7 @@ h1, h2, h3 { font-weight: 600; letter-spacing: -0.01em; }
 
 .pill-live { color: var(--tier-low); border-color: color-mix(in srgb, var(--tier-low) 35%, transparent); background: color-mix(in srgb, var(--tier-low) 10%, transparent); }
 .pill-live .pill-dot { animation: pulse 1.8s ease-out infinite; }
+.pill-stale, .pill-waiting { color: var(--tier-medium); border-color: color-mix(in srgb, var(--tier-medium) 35%, transparent); background: color-mix(in srgb, var(--tier-medium) 10%, transparent); }
 .pill-offline { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent); background: color-mix(in srgb, var(--danger) 10%, transparent); }
 
 @keyframes pulse {
@@ -190,6 +191,10 @@ h1, h2, h3 { font-weight: 600; letter-spacing: -0.01em; }
     :root:not([data-theme="light"]) .icon-sun { display: none; }
     :root:not([data-theme="light"]) .icon-moon { display: block; }
 }
+
+/* Cloud (read-only) mode: no controls */
+.is-hosted .controls,
+.is-hosted #trigger-election-btn { display: none; }
 
 /* ---------- Layout ---------- */
 

@@ -182,11 +182,14 @@ page prompts for the key once. See `.env.example` for all settings.
 
 A Postman collection covering every endpoint is in `postman/`.
 
-### Deployment (Google Cloud)
+### Deployment
 
-The dashboard and simulation deploy to a single Always Free GCP e2-micro VM behind nginx.
-Step-by-step instructions, cost notes and an evidence checklist are in
-[`deploy/README.md`](deploy/README.md).
+**Free, no card (current):** the fog layer runs locally and publishes a snapshot to
+**Supabase** every few seconds; a read-only dashboard on **Firebase Hosting** shows it.
+See [`deploy/FREE_CLOUD.md`](deploy/FREE_CLOUD.md).
+
+**Alternative (needs a card):** run everything on one GCP e2-micro VM behind nginx.
+See [`deploy/README.md`](deploy/README.md).
 
 ### Running Tests
 ```bash
@@ -199,6 +202,7 @@ python tests/test_route_optimization.py   # routing, priority tiers, route manag
 python tests/test_inter_fog_comm.py       # peer discovery, gossip, spillover
 python tests/test_ledger.py               # ledger commit, audit, tamper detection
 python tests/test_web_api.py              # FastAPI endpoints, admin auth, validation
+python tests/test_cloud.py                # Supabase publisher, Firebase build
 ```
 `test_web_api.py` is skipped automatically if the web dependencies are not installed.
 
@@ -243,11 +247,15 @@ fog-waste-system/
 |
 |-- web/
 |   |-- app.py                 # FastAPI app: REST API + dashboard
-|   |-- launch.py              # Local launcher (uvicorn)
-|   |-- static/, templates/    # Dashboard frontend
+|   |-- cloud_publisher.py     # Pushes snapshots to Supabase (fog -> cloud)
+|   |-- launch.py              # Local launcher (uvicorn, reads .env)
+|   |-- static/, templates/    # Dashboard frontend (local and cloud modes)
 |
+|-- supabase/schema.sql        # Cloud table + read-only RLS policy
+|-- hosting/build.py           # Builds the read-only dashboard for Firebase Hosting
+|-- firebase.json              # Firebase Hosting config
 |-- postman/                   # Postman collection + environment
-|-- deploy/                    # GCP VM setup: systemd unit, nginx config, setup.sh
+|-- deploy/                    # FREE_CLOUD.md (Supabase+Firebase) and GCP VM setup
 |
 |-- main.py                     # System entry point
 |-- demo.py                     # Demo scenarios

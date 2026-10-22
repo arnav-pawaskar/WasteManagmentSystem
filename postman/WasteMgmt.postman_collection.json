@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "fb5f0dfa-5f97-4ad4-9f8c-328a71879afe",
     "name": "Fog Waste Management API",
-    "description": "Tests for the FastAPI service in web/app.py. Select the 'Fog Waste Management' environment, set admin_key, then run the whole collection in order with the Collection Runner.",
+    "description": "Tests for the Fog Waste Management system. Folders 1-3 test the local FastAPI fog layer (base_url, admin_key). Folder 4 tests the Supabase cloud tier (supabase_url, supabase_publishable_key). Run in order with the Collection Runner.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
@@ -704,6 +704,167 @@
               ]
             },
             "description": ""
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Cloud (Supabase)",
+      "description": "The cloud tier: the fog layer upserts one snapshot row; the public dashboard reads it with the publishable key. Row Level Security makes that key read-only.",
+      "item": [
+        {
+          "name": "Read latest snapshot",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Responds in < 2000 ms\", () => pm.expect(pm.response.responseTime).to.be.below(2000));",
+                  "const rows = pm.response.json();",
+                  "pm.test(\"exactly one live row\", () => pm.expect(rows).to.have.lengthOf(1));",
+                  "const p = rows[0].payload;",
+                  "pm.test(\"payload has dashboard data\", () => pm.expect(p).to.include.all.keys(\"status\", \"bins\", \"routes\", \"network\", \"events\", \"cloud\"));",
+                  "pm.test(\"bins carry fill levels\", () => pm.expect(p.bins[0]).to.include.all.keys(\"bin_id\", \"fill_level\"));",
+                  "const ageS = (Date.now() - new Date(rows[0].published_at)) / 1000;",
+                  "pm.test(\"snapshot is fresh (< 30 s) while the fog layer runs\", () => pm.expect(ageS).to.be.below(30));",
+                  "if (p.cloud && p.cloud.sync_ms != null) console.log(\"fog -> cloud sync:\", p.cloud.sync_ms, \"ms\");"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{supabase_publishable_key}}"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{supabase_url}}/rest/v1/snapshots?id=eq.live&select=published_at,payload",
+              "host": [
+                "{{supabase_url}}"
+              ],
+              "path": [
+                "rest",
+                "v1",
+                "snapshots"
+              ],
+              "query": [
+                {
+                  "key": "id",
+                  "value": "eq.live"
+                },
+                {
+                  "key": "select",
+                  "value": "published_at,payload"
+                }
+              ]
+            },
+            "description": "What the Firebase-hosted dashboard calls every 3 s."
+          }
+        },
+        {
+          "name": "Write with publishable key -> denied",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"RLS blocks writes from the public key (401/403)\", () => pm.expect(pm.response.code).to.be.oneOf([401, 403]));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "apikey",
+                "value": "{{supabase_publishable_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Prefer",
+                "value": "resolution=merge-duplicates,return=minimal"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"live\",\n  \"payload\": {\n    \"tampered\": true\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{supabase_url}}/rest/v1/snapshots?on_conflict=id",
+              "host": [
+                "{{supabase_url}}"
+              ],
+              "path": [
+                "rest",
+                "v1",
+                "snapshots"
+              ],
+              "query": [
+                {
+                  "key": "on_conflict",
+                  "value": "id"
+                }
+              ]
+            },
+            "description": "Proves visitors cannot overwrite the snapshot: only the fog layer's secret key can write."
+          }
+        },
+        {
+          "name": "Read without API key -> 401",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 401\", () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{supabase_url}}/rest/v1/snapshots?id=eq.live&select=published_at",
+              "host": [
+                "{{supabase_url}}"
+              ],
+              "path": [
+                "rest",
+                "v1",
+                "snapshots"
+              ],
+              "query": [
+                {
+                  "key": "id",
+                  "value": "eq.live"
+                },
+                {
+                  "key": "select",
+                  "value": "published_at"
+                }
+              ]
+            }
           }
         }
       ]

@@ -34,3 +34,8 @@ Thumbs.db
 .claude/
 CLAUDE.local.md
 skills-lock.json
+
+# Firebase Hosting build output and CLI cache
+hosting/public/
+.firebase/
+firebase-debug.log

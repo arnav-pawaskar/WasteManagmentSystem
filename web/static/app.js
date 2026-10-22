@@ -1,7 +1,11 @@
 // Fog Waste Console — dashboard controller (vanilla JS, no dependencies)
 
+// config.js sets window.WMS_CONFIG. Local (FastAPI) mode reads /api/*; cloud mode
+// (Firebase Hosting) reads the snapshot the fog layer publishes to Supabase.
+const CONFIG = window.WMS_CONFIG || { mode: 'local' };
+const HOSTED = CONFIG.mode === 'cloud';
 const API_BASE = '';
-const POLL_MS = 2000;
+const POLL_MS = HOSTED ? (CONFIG.pollMs || 3000) : 2000;
 let updateInterval = null;
 let isRunning = false;
 
@@ -290,7 +294,7 @@ async function triggerElection() {
 }
 
 function setPill(state) {
-    const labels = { live: 'Live', stopped: 'Stopped', offline: 'Offline' };
+    const labels = { live: 'Live', stopped: 'Stopped', offline: 'Offline', stale: 'Fog offline', waiting: 'Waiting' };
     statusPill.className = 'pill pill-' + state;
     statusPill.querySelector('.pill-text').textContent = labels[state];
 }
@@ -300,7 +304,7 @@ function updateUIState() {
     stopBtn.disabled = !isRunning;
     triggerElectionBtn.disabled = !isRunning;
     ['zones', 'bins', 'trucks'].forEach(id => { $(id).disabled = isRunning; });
-    setPill(isRunning ? 'live' : 'stopped');
+    if (!HOSTED) setPill(isRunning ? 'live' : 'stopped');   // cloud mode sets it from data age
 }
 
 function startUpdates() {
@@ -320,7 +324,21 @@ function stopUpdates() {
 // Polling
 // ---------------------------------------------------------------------------
 
+function applySnapshot({ status, bins, routes, network, events }) {
+    lastStatus = status;
+    binsData = bins || [];
+    routesData = routes || [];
+    networkData = network || { nodes: [], edges: [] };
+    serverEvents = events || [];
+
+    updateStatusDisplay(status);
+    redrawAll();
+    updateEventLog();
+    updateModuleStats(status);
+}
+
 async function updateAllData() {
+    if (HOSTED) return updateFromCloud();
     if (!isRunning) return;
 
     try {
@@ -334,12 +352,6 @@ async function updateAllData() {
         if (responses.some(r => !r.ok)) throw new Error('Server returned an error');
         const [status, bins, routes, network, events] = await Promise.all(responses.map(r => r.json()));
 
-        lastStatus = status;
-        binsData = bins;
-        routesData = routes;
-        networkData = network;
-        serverEvents = events;
-
         if (!status.running) {
             // Stopped by another admin
             isRunning = false;
@@ -349,14 +361,63 @@ async function updateAllData() {
             setPill('live');
         }
         lastUpdatedEl.textContent = 'Updated ' + formatTime(new Date());
-
-        updateStatusDisplay(status);
-        redrawAll();
-        updateEventLog();
-        updateModuleStats(status);
+        applySnapshot({ status, bins, routes, network, events });
     } catch (error) {
         console.error('Error:', error);
         setPill('offline');
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cloud mode: read the latest snapshot from Supabase (read-only publishable key)
+// ---------------------------------------------------------------------------
+
+async function fetchCloudSnapshot() {
+    const base = String(CONFIG.supabaseUrl || '').replace(/\/+$/, '');
+    const response = await fetch(`${base}/rest/v1/snapshots?id=eq.live&select=published_at,payload`, {
+        headers: { apikey: CONFIG.supabaseKey, Accept: 'application/json' },
+        cache: 'no-store'
+    });
+    if (!response.ok) throw new Error('Supabase returned ' + response.status);
+    const rows = await response.json();
+    return rows[0] || null;
+}
+
+function formatAge(seconds) {
+    if (seconds < 5) return 'just now';
+    if (seconds < 60) return Math.round(seconds) + ' s ago';
+    if (seconds < 3600) return Math.round(seconds / 60) + ' min ago';
+    return 'at ' + formatTime(new Date(Date.now() - seconds * 1000));
+}
+
+async function updateFromCloud() {
+    try {
+        const row = await fetchCloudSnapshot();
+        if (!row) {
+            setPill('waiting');
+            lastUpdatedEl.textContent = 'No data published yet';
+            return;
+        }
+        const payload = row.payload || {};
+        const ageS = Math.max(0, (Date.now() - new Date(row.published_at)) / 1000);
+        const cloud = payload.cloud || {};
+        const staleAfter = Math.max(15, 4 * (cloud.interval_s || 3));
+
+        applySnapshot(payload);
+
+        if (!payload.status?.running) setPill('stopped');
+        else if (ageS > staleAfter) setPill('stale');
+        else setPill('live');
+        lastUpdatedEl.textContent = 'Fog data ' + formatAge(ageS);
+
+        const sync = cloud.sync_ms != null ? `, last sync ${Math.round(cloud.sync_ms)} ms` : '';
+        $('footnote').textContent =
+            `Read-only view. The fog layer publishes to Supabase every ${cloud.interval_s || 3} s${sync}. ` +
+            'Fog nodes run as threads within one simulation process.';
+    } catch (error) {
+        console.error('Error:', error);
+        setPill('offline');
+        lastUpdatedEl.textContent = 'Cannot reach Supabase';
     }
 }
 
@@ -930,6 +991,7 @@ async function attachToRunningSystem() {
     }
 }
 
+if (HOSTED) document.body.classList.add('is-hosted');
 readPalette();
 initCanvases();
 updateUIState();
@@ -938,8 +1000,18 @@ renderStats('route-stats', [['Active routes', 0], ['Completed', 0], ['Bins servi
 renderStats('comm-stats', [['Peers per node', '—'], ['Messages sent', 0], ['Spillovers ok / rejected', '0 / 0']]);
 renderStats('election-stats', [['State', 'Idle'], ['Leader', '—'], ['Term', 0]]);
 renderStats('ledger-stats', [['Blocks', 0], ['Committed events', 0], ['Quorum', '—'], ['Chain integrity', '—']]);
-attachToRunningSystem().then(attached => {
-    addEvent('SYSTEM', attached
-        ? 'Dashboard attached to the running simulation'
-        : 'Dashboard ready — press Start to run the simulation');
-});
+if (HOSTED) {
+    // Read-only: poll the cloud snapshot whether or not the fog layer is up right now
+    // (the footer's /docs link only exists on the local FastAPI server)
+    $('footnote').textContent = 'Read-only view of data published by the fog layer to Supabase.';
+    setPill('waiting');
+    isRunning = true;
+    startUpdates();
+    addEvent('SYSTEM', 'Cloud dashboard — read-only view of the fog layer');
+} else {
+    attachToRunningSystem().then(attached => {
+        addEvent('SYSTEM', attached
+            ? 'Dashboard attached to the running simulation'
+            : 'Dashboard ready — press Start to run the simulation');
+    });
+}
